@@ -100,7 +100,7 @@ const float yawOutLimits{15.0f};    // yaw PID output limits
 // JOYSTICK LIMITS
 // Y, P, R and throttle controller limits
 float yawLimit{0.3f}, pitchLimit{0.07f}, rollLimit{0.07f}, throtleLimit{200};  // map(input, 0, 100, 0, limit)
-int yawDeadzone{15};                                                         // from -x to x controller does nothing
+int yawDeadzone{15};                                                           // from -x to x controller does nothing
 // because pitchPID output limit is 25, roll is 25 and yaw is 10 == 25 + 25 + 10
 // joystick throttle goes from 0 to 100. 100 * 1.95 = 195 throttle + 60 in worst case scenario for PID corrections
 int throttle{0};  // RemoteXY.joyYT_y * throttleLimit
@@ -113,8 +113,8 @@ bool yawInvertOutput{0};  // invert yawOutput when yawDeg < 0 so we never encoun
 //               PID TUNINGS               //
 /////////////////////////////////////////////
 float prP{0.28f}, prI{0.05f}, prD{0.10f};  // Pitch&Roll kp, ki, kd .3, .02, .11
-float yP{0.3f}, yI{0.0f}, yD{0.0f};       // Yaw kp ki kd	2.5, 0, 0
-int trimRoll{0}, trimPitch{0};            // trim values (if drone is leaning, you can correct with theese)
+float yP{0.3f}, yI{0.0f}, yD{0.0f};        // Yaw kp ki kd	2.5, 0, 0
+int trimRoll{0}, trimPitch{0};             // trim values (if drone is leaning, you can correct with theese)
 // -Left trimRoll Right+	(direction of the nose)	+Up trimPitch Down-
 // Turn on the drone and sellect YPR output... test
 
@@ -368,11 +368,8 @@ void loop() {
         mpu.dmpGetGravity(&gravity, &q);
         mpu.dmpGetYawPitchRoll(ypr, &q, &gravity);
         mpu.dmpGetGyro(&rot, fifoBuffer);
-        yawDps = (yawDps * 0.8f) + (rot.z * 0.2f);  // soft complementary filter
-        // yawDeg = ypr[0] * RAD_TO_DEG;
-        // if (yawDeg < 0) {
-        //     yawDeg *= -1;
-        // }
+        yawDps = (yawDps * 0.8f) + (rot.z * 0.2f);  // complementary filter
+        yawDeg = ypr[0] * RAD_TO_DEG;
         pitchDeg = ypr[1] * RAD_TO_DEG;
         rollDeg = ypr[2] * RAD_TO_DEG;
     }
