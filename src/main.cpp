@@ -95,11 +95,11 @@ int BRspeed{0};
 
 const uint32_t sampleTimeUs{6000};  // 1000 us = 1 ms
 const float prOutLimits{20.0f};     // pitch and roll PID output limits
-const float yawOutLimits{20.0f};    // yaw PID output limits
+const float yawOutLimits{15.0f};    // yaw PID output limits
 
 // JOYSTICK LIMITS
 // Y, P, R and throttle controller limits
-float yawLimit{0.1f}, pitchLimit{0.1f}, rollLimit{0.1f}, throtleLimit{200};  // map(input, 0, 100, 0, limit)
+float yawLimit{0.3f}, pitchLimit{0.07f}, rollLimit{0.07f}, throtleLimit{200};  // map(input, 0, 100, 0, limit)
 int yawDeadzone{15};                                                         // from -x to x controller does nothing
 // because pitchPID output limit is 25, roll is 25 and yaw is 10 == 25 + 25 + 10
 // joystick throttle goes from 0 to 100. 100 * 1.95 = 195 throttle + 60 in worst case scenario for PID corrections
@@ -112,8 +112,8 @@ bool yawInvertOutput{0};  // invert yawOutput when yawDeg < 0 so we never encoun
 /////////////////////////////////////////////
 //               PID TUNINGS               //
 /////////////////////////////////////////////
-float prP{0.3f}, prI{0.06f}, prD{0.11f};  // Pitch&Roll kp, ki, kd .3, .04, 2
-float yP{2.5f}, yI{0.0f}, yD{0.0f};       // Yaw kp ki kd	2.5, 0, 0
+float prP{0.28f}, prI{0.05f}, prD{0.10f};  // Pitch&Roll kp, ki, kd .3, .02, .11
+float yP{0.3f}, yI{0.0f}, yD{0.0f};       // Yaw kp ki kd	2.5, 0, 0
 int trimRoll{0}, trimPitch{0};            // trim values (if drone is leaning, you can correct with theese)
 // -Left trimRoll Right+	(direction of the nose)	+Up trimPitch Down-
 // Turn on the drone and sellect YPR output... test
@@ -140,7 +140,7 @@ VectorFloat gravity;  // [x, y, z]				gravity vector
 float euler[3];       // [psi, theta, phi]		Euler angle container
 float ypr[3];         // [yaw, pitch, roll]		yaw/pitch/roll container and gravity vector
 float yawDeg{0.0f}, pitchDeg{0.0f}, rollDeg{0.0f};
-int16_t yawDps{0};  // yaw in degrees per second
+float yawDps{0};  // yaw in degrees per second
 
 // ===               INTERRUPT DETECTION ROUTINE                ===
 volatile bool mpuInterrupt = false;  // indicates whether MPU interrupt pin has gone high
@@ -148,7 +148,7 @@ void dmpDataReady() {
     mpuInterrupt = true;
 }
 
-QuickPID yawPID(&yawDeg, &yawOutput, &yawSetpoint);
+QuickPID yawPID(&yawDps, &yawOutput, &yawSetpoint);
 QuickPID pitchPID(&pitchDeg, &pitchOutput, &pitchSetpoint);
 QuickPID rollPID(&rollDeg, &rollOutput, &rollSetpoint);
 
@@ -169,10 +169,10 @@ void smoothBat() {
 // values are stored in FRspeed, FLspeed, ...
 void calculateELMspeed() {
     if (armDisarm == 1) {
-        FLspeed = throttle + pitchOutput + rollOutput - yawOutput;  // front left (CW)
-        FRspeed = throttle + pitchOutput - rollOutput + yawOutput;  // back	left (CCW)
-        BLspeed = throttle - pitchOutput + rollOutput + yawOutput;  // front right (CCW)
-        BRspeed = throttle - pitchOutput - rollOutput - yawOutput;  // back	right (CW)
+        FLspeed = throttle + pitchOutput + rollOutput + yawOutput;  // front left (CW)
+        FRspeed = throttle + pitchOutput - rollOutput - yawOutput;  // back	left (CCW)
+        BLspeed = throttle - pitchOutput + rollOutput - yawOutput;  // front right (CCW)
+        BRspeed = throttle - pitchOutput - rollOutput + yawOutput;  // back	right (CW)
 
         if (FLspeed < 6) FLspeed = 6;
         if (FRspeed < 6) FRspeed = 6;
@@ -206,7 +206,7 @@ void calculateSetpoint() {
         pitchSetpoint = (RemoteXY.joyRP_y * (-pitchLimit)) + trimPitch;
         throttle = map(RemoteXY.joyYT_y, -100, 100, 0, throtleLimit);
         if ((RemoteXY.joyYT_x <= -yawDeadzone) || (RemoteXY.joyYT_x >= yawDeadzone)) {
-            yawSetpoint = RemoteXY.joyYT_x * yawLimit;
+            yawSetpoint = RemoteXY.joyYT_x * (-yawLimit);
             // completentary filter taking 95% of position from previous Setpoint and adding 5% from the new desired point
             // It prevents quad from yawing when joystick yaw is 0
             // yawDeg + RemoteXY.joyYT_x * yawLimit follows drones current yaw rotation and adds desired offset
@@ -368,7 +368,7 @@ void loop() {
         mpu.dmpGetGravity(&gravity, &q);
         mpu.dmpGetYawPitchRoll(ypr, &q, &gravity);
         mpu.dmpGetGyro(&rot, fifoBuffer);
-        yawDps = (yawDps * 0.9) + (rot.z * 0.1);  // soft complementary filter
+        yawDps = (yawDps * 0.8f) + (rot.z * 0.2f);  // soft complementary filter
         // yawDeg = ypr[0] * RAD_TO_DEG;
         // if (yawDeg < 0) {
         //     yawDeg *= -1;
@@ -554,26 +554,21 @@ void loop() {
             case 3:
                 dtostrf(pitchPID.GetPterm(), 1, 3, buf0);
                 dtostrf(rollPID.GetPterm(), 1, 3, buf1);
-                // dtostrf(rollSetpoint, 1, 3, buf2);
-                // dtostrf(throttle, 1, 3, buf3);
                 snprintf_P(RemoteXY.textField, sizeof(RemoteXY.textField), PSTR("pPT:%s;rPT:%s"), buf0, buf1);
                 break;
             case 4:
                 dtostrf(pitchPID.GetDterm(), 1, 3, buf0);
                 dtostrf(rollPID.GetDterm(), 1, 3, buf1);
-                // dtostrf(rollSetpoint, 1, 3, buf2);
-                // dtostrf(throttle, 1, 3, buf3);
                 snprintf_P(RemoteXY.textField, sizeof(RemoteXY.textField), PSTR("pDT:%s;rDT:%s"), buf0, buf1);
                 break;
             case 5:
                 dtostrf(pitchOutput, 1, 1, buf0);
                 dtostrf(rollOutput, 1, 1, buf1);
-                // dtostrf(rollSetpoint, 1, 3, buf2);
-                // dtostrf(throttle, 1, 3, buf3);
                 snprintf_P(RemoteXY.textField, sizeof(RemoteXY.textField), PSTR("pout:%s;rout:%s"), buf0, buf1);
                 break;
             case 6:
-                snprintf_P(RemoteXY.textField, sizeof(RemoteXY.textField), PSTR("%d"), yawDps);
+                dtostrf(yawDps, 1, 1, buf0);
+                snprintf_P(RemoteXY.textField, sizeof(RemoteXY.textField), PSTR("yawDps: %s"), buf0);
                 break;
             default:
                 snprintf_P(RemoteXY.textField, sizeof(RemoteXY.textField), PSTR("FL:%d;FR:%d;BL:%d;BR:%d"), FLspeed, FRspeed, BLspeed, BRspeed);
