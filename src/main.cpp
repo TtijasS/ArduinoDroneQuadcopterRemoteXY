@@ -66,8 +66,7 @@ bool computeBattery{0};
 unsigned long timerBattery{0};   // computer smooth battery value every x millis, so RemoteXY doesn't update edit field every loop
 unsigned long timerSetpoint{0};  // read battery every x seconds
 unsigned long timerPID{0};       // timer for PID calculations
-unsigned long lastPIDtimer{0};
-bool armDisarm{0};  // enable or dissable drone throttle
+bool armDisarm{0};               // enable or dissable drone throttle
 
 // buffers for converting floats to string
 char buf0[10];
@@ -108,8 +107,7 @@ int throttle{0};  // RemoteXY.joyYT_y * throttleLimit
 float rollSetpoint{0.0f}, rollInput{0.0f}, rollOutput{0.0f};
 float pitchSetpoint{0.0f}, pitchInput{0.0f}, pitchOutput{0.0f};
 float yawSetpoint{0.0f}, yawInput{0.0f}, yawOutput{0.0f};
-bool yawInvertOutput{0};	// invert yawOutput when yawDeg < 0 so we never encounter transition from 180 to -180, which makes PID go crazy
-
+bool yawInvertOutput{0};  // invert yawOutput when yawDeg < 0 so we never encounter transition from 180 to -180, which makes PID go crazy
 
 /////////////////////////////////////////////
 //               PID TUNINGS               //
@@ -120,7 +118,6 @@ int trimRoll{0}, trimPitch{0};            // trim values (if drone is leaning, y
 // -Left trimRoll Right+	(direction of the nose)	+Up trimPitch Down-
 // Turn on the drone and sellect YPR output... test
 
-bool pidComputeFlag{0};  // if uart transmission blocks compute process, flag used to compute asap
 /////////////////////////////////////////////
 //                   MPU                   //
 /////////////////////////////////////////////
@@ -143,7 +140,7 @@ VectorFloat gravity;  // [x, y, z]				gravity vector
 float euler[3];       // [psi, theta, phi]		Euler angle container
 float ypr[3];         // [yaw, pitch, roll]		yaw/pitch/roll container and gravity vector
 float yawDeg{0.0f}, pitchDeg{0.0f}, rollDeg{0.0f};
-int16_t yawDps{0};    // yaw in degrees per second
+int16_t yawDps{0};  // yaw in degrees per second
 
 // ===               INTERRUPT DETECTION ROUTINE                ===
 volatile bool mpuInterrupt = false;  // indicates whether MPU interrupt pin has gone high
@@ -214,34 +211,32 @@ void calculateSetpoint() {
             // It prevents quad from yawing when joystick yaw is 0
             // yawDeg + RemoteXY.joyYT_x * yawLimit follows drones current yaw rotation and adds desired offset
             // yawSetpoint = (yawSetpoint * 0.7f) + (yawDeg + RemoteXY.joyYT_x * yawLimit) * 0.3f;
-			// if (yawInvertOutput)
-			// 	yawSetpoint *= -1;
-			// else
-			
-			// if (yawSetpoint > 180){
-			// 	yawSetpoint
-			// }
+            // if (yawInvertOutput)
+            // 	yawSetpoint *= -1;
+            // else
+
+            // if (yawSetpoint > 180){
+            // 	yawSetpoint
+            // }
             // if (yawSetpoint > 180)
             //     yawSetpoint -= 360;
             // else if (yawSetpoint < -180)
             //     yawSetpoint += 360;
-        } 
-		// else {
-        //     yawSetpoint = (yawSetpoint * 0.9f) + (yawDeg * 0.1f);
-        // }
+        } else {
+            // yawSetpoint = (yawSetpoint * 0.9f) + (yawDeg * 0.1f);
+            yawSetpoint = 0;
+        }
         timerSetpoint = millis();
     }
 }
 
 void computePID() {
-    // > is a tiny bit quicker than >= while 1 us doesn't matter here
     if (micros() - timerPID >= sampleTimeUs) {
         yawPID.Compute();
         pitchPID.Compute();
         rollPID.Compute();
         calculateELMspeed();
         setELMspeed();
-        lastPIDtimer = micros() - timerPID;
         timerPID = micros();
     }
 }
@@ -372,7 +367,7 @@ void loop() {
         mpu.dmpGetQuaternion(&q, fifoBuffer);
         mpu.dmpGetGravity(&gravity, &q);
         mpu.dmpGetYawPitchRoll(ypr, &q, &gravity);
-		mpu.dmpGetGyro(&rot, fifoBuffer);
+        mpu.dmpGetGyro(&rot, fifoBuffer);
         yawDps = (yawDps * 0.9) + (rot.z * 0.1);  // soft complementary filter
         // yawDeg = ypr[0] * RAD_TO_DEG;
         // if (yawDeg < 0) {
