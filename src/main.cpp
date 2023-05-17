@@ -273,6 +273,18 @@ void computePID() {
     }
 }
 
+// If throttle stick equals 100, PID increments will change by 1.0,
+// if it's -100 (lowest position) they change by 0.001,
+// else (middle position) by 0.01
+void setPIDincrements() {
+    if (RemoteXY.joyYT_y == 100)
+        incrementPID = 1.0f;
+    else if (RemoteXY.joyYT_y == -100)
+        incrementPID = 0.001f;
+    else
+        incrementPID = 0.01;
+}
+
 /////////////////////////////////////////////
 //                  SETUP                  //
 /////////////////////////////////////////////
@@ -449,13 +461,7 @@ void loop() {
 
             // We check if 200 ms has passed, so buttons work more consistent
         } else if (millis() - timerBattery > 100) {
-            if (RemoteXY.joyYT_y == 100)
-                incrementPID = 1.0f;
-            else if (RemoteXY.joyYT_y == -100)
-                incrementPID = 0.001f;
-            else
-                incrementPID = 0.01;
-
+            setPIDincrements();
             switch (RemoteXY.btnSelect) {
                 case 0:
                     dtostrf(batteryVoltage, 1, 1, buf0);
