@@ -94,13 +94,13 @@ int BLspeed{0};
 int BRspeed{0};
 
 const uint32_t sampleTimeUs{6000};  // 1000 us = 1 ms
-const float prOutLimits{20.0f};     // pitch and roll PID output limits
+const float prOutLimits{15.0f};     // pitch and roll PID output limits
 const float yawOutLimits{15.0f};    // yaw PID output limits
 
 // JOYSTICK LIMITS
 // Y, P, R and throttle controller limits
-float yawLimit{0.3f}, pitchLimit{0.07f}, rollLimit{0.07f}, throtleLimit{200};  // map(input, 0, 100, 0, limit)
-int yawDeadzone{15};                                                           // from -x to x controller does nothing
+float yawLimit{0.3f}, pitchLimit{0.1f}, rollLimit{0.1f}, throtleLimit{200};  // map(input, 0, 100, 0, limit)
+int yawDeadzone{15};                                                         // from -x to x controller does nothing
 // because pitchPID output limit is 25, roll is 25 and yaw is 10 == 25 + 25 + 10
 // joystick throttle goes from 0 to 100. 100 * 1.95 = 195 throttle + 60 in worst case scenario for PID corrections
 int throttle{0};  // RemoteXY.joyYT_y * throttleLimit
@@ -112,9 +112,13 @@ bool yawInvertOutput{0};  // invert yawOutput when yawDeg < 0 so we never encoun
 /////////////////////////////////////////////
 //               PID TUNINGS               //
 /////////////////////////////////////////////
-float prP{0.28f}, prI{0.05f}, prD{0.10f};  // Pitch&Roll kp, ki, kd .3, .02, .11
+float prP{0.38f}, prI{0.03f}, prD{0.14f};  // Pitch&Roll kp, ki, kd .3, .02, .11
 float yP{0.3f}, yI{0.0f}, yD{0.0f};        // Yaw kp ki kd	2.5, 0, 0
 int trimRoll{0}, trimPitch{0};             // trim values (if drone is leaning, you can correct with theese)
+
+// for turning off I term when error is too big
+bool pitchIswitch{0}, rollIswitch{0};
+
 // -Left trimRoll Right+	(direction of the nose)	+Up trimPitch Down-
 // Turn on the drone and sellect YPR output... test
 
@@ -131,16 +135,16 @@ uint16_t fifoCount;      // count of all bytes currently in FIFO
 uint8_t fifoBuffer[64];  // FIFO storage buffer
 
 // orientation/motion vars
-Quaternion q;         // [w, x, y, z]			quaternion container
-VectorInt16 rot;      // [x, y, z]				angular velocity
-VectorInt16 aa;       // [x, y, z]				accel sensor measurements
-VectorInt16 aaReal;   // [x, y, z]				gravity-free accel sensor measurements
-VectorInt16 aaWorld;  // [x, y, z]				world-frame accel sensor measurements
-VectorFloat gravity;  // [x, y, z]				gravity vector
-float euler[3];       // [psi, theta, phi]		Euler angle container
-float ypr[3];         // [yaw, pitch, roll]		yaw/pitch/roll container and gravity vector
-float yawDeg{0.0f}, pitchDeg{0.0f}, rollDeg{0.0f};
-float yawDps{0};  // yaw in degrees per second
+Quaternion q;                         // [w, x, y, z]			quaternion container
+VectorInt16 rot;                      // [x, y, z]				angular velocity
+VectorInt16 aa;                       // [x, y, z]				accel sensor measurements
+VectorInt16 aaReal;                   // [x, y, z]				gravity-free accel sensor measurements
+VectorInt16 aaWorld;                  // [x, y, z]				world-frame accel sensor measurements
+VectorFloat gravity;                  // [x, y, z]				gravity vector
+float euler[3];                       // [psi, theta, phi]		Euler angle container
+float ypr[3];                         // [yaw, pitch, roll]		yaw/pitch/roll container and gravity vector
+float pitchDeg{0.0f}, rollDeg{0.0f};  // yawDeg{0.0f},
+float yawDps{0};                      // yaw in degrees per second
 
 // ===               INTERRUPT DETECTION ROUTINE                ===
 volatile bool mpuInterrupt = false;  // indicates whether MPU interrupt pin has gone high
@@ -230,8 +234,36 @@ void calculateSetpoint() {
     }
 }
 
+void pitchITermSwitch(int maxErr) {
+    float pitchErr = abs(pitchSetpoint - pitchDeg);
+    // pitchIswitch == 0 - normal pitchPID mode (all terms in use)
+    // pitchIswitch == 1 - no I term pitchPID mode
+    if (pitchIswitch == 0 && pitchErr > maxErr) {
+        pitchPID.SetTunings(prP, 0.0f, prD);
+        pitchIswitch = 1;
+    } else if (pitchIswitch == 1 && pitchErr <= maxErr) {
+        pitchPID.SetTunings(prP, prI, prD);
+        pitchIswitch = 0;
+    }
+}
+
+void rollITermSwitch(int maxErr) {
+    float rollErr = abs(rollSetpoint - rollDeg);
+    // rollIswitch == 0 - normal pitchPID mode (all terms in use)
+    // rollIswitch == 1 - no I term pitchPID mode
+    if (rollIswitch == 0 && rollErr > maxErr) {
+        rollPID.SetTunings(prP, 0.0f, prD);
+        rollIswitch = 1;
+    } else if (rollIswitch == 1 && rollErr <= maxErr) {
+        rollPID.SetTunings(prP, prI, prD);
+        rollIswitch = 0;
+    }
+}
+
 void computePID() {
     if (micros() - timerPID >= sampleTimeUs) {
+        pitchITermSwitch(20);  // turn off pitch I term when error is bigger than maxErr value
+        rollITermSwitch(20);   // turn off roll I term when error is bigger than maxErr value
         yawPID.Compute();
         pitchPID.Compute();
         rollPID.Compute();
@@ -245,24 +277,24 @@ void computePID() {
 //                  SETUP                  //
 /////////////////////////////////////////////
 void setup() {
-    // Setup motor PWM frequency setup from 490 Hz to 31.4 kHz
+    // Setup motor PWM frequency from 490 Hz to 31.4 kHz
     TCCR1A = 0b00000001;  // Pins D9, D10 to 8bit phase correct
     TCCR1B = 0b00000001;  //
     TCCR2B = 0b00000001;  // Pins D3, D11 to 8bit phase correct
     TCCR2A = 0b00000001;  // phase correct -> count up 8-bit, count down 8-bit (2*256)
 
-    // Motor pins setup
-    // https://docs.arduino.cc/hacking/software/PortManipulation
-    // 		 | 7 |6 |5 | 4 | 3 | 2 | 1| 0 |	(bits of 8-bit register)
-    // DDRD = {7, 6, 5,  4,  3,  2,  1, 0}	(pinout map of register D)
-    // DDRB = {?, ?, 13, 12, 11, 10, 9, 8}	(pinout map of register B)
-    // (FLmotor, OUTPUT); front left ; DDRD pin 3
-    DDRD |= 0b00001000;
+    // // Motor pins setup
+    // // https://docs.arduino.cc/hacking/software/PortManipulation
+    // // 		 | 7 |6 |5 | 4 | 3 | 2 | 1| 0 |	(bits of 8-bit register)
+    // // DDRD = {7, 6, 5,  4,  3,  2,  1, 0}	(pinout map of register D)
+    // // DDRB = {?, ?, 13, 12, 11, 10, 9, 8}	(pinout map of register B)
+    // // (FLmotor, OUTPUT); front left ; DDRD pin 3
+    // DDRD |= 0b00001000;
 
-    // pinMode(BLmotor, OUTPUT);  back left ; DDRB pin 9
-    // pinMode(BRmotor, OUTPUT);  back right ; DDRB pin 10
-    // pinMode(FRmotor, OUTPUT);  front right ; DDRB pin 11
-    DDRB |= 0b00001110;
+    // // pinMode(BLmotor, OUTPUT);  back left ; DDRB pin 9
+    // // pinMode(BRmotor, OUTPUT);  back right ; DDRB pin 10
+    // // pinMode(FRmotor, OUTPUT);  front right ; DDRB pin 11
+    // DDRB |= 0b00001110;
 
     // join I2C bus (I2Cdev library doesn't do this automatically)
 #if I2CDEV_IMPLEMENTATION == I2CDEV_ARDUINO_WIRE
@@ -296,6 +328,14 @@ void setup() {
     pitchPID.SetTunings(prP, prI, prD);
     rollPID.SetTunings(prP, prI, prD);
     yawPID.SetTunings(yP, yI, yD);
+
+    // Set up ports for PWM, then in the loop we
+    // directly manipulate the compare value registers (OCR1A/B OCR2A/B)
+    // This makes a loop cycle a bit faster
+    // analogWrite(FLmotor, FLspeed);
+    // analogWrite(FRmotor, FRspeed);
+    // analogWrite(BLmotor, BLspeed);
+    // analogWrite(BRmotor, BRspeed);
 
     // MPU6050 init, setup and calibration
     devStatus = mpu.dmpInitialize();
@@ -369,7 +409,7 @@ void loop() {
         mpu.dmpGetYawPitchRoll(ypr, &q, &gravity);
         mpu.dmpGetGyro(&rot, fifoBuffer);
         yawDps = (yawDps * 0.8f) + (rot.z * 0.2f);  // complementary filter
-        yawDeg = ypr[0] * RAD_TO_DEG;
+        // yawDeg = ypr[0] * RAD_TO_DEG;
         pitchDeg = ypr[1] * RAD_TO_DEG;
         rollDeg = ypr[2] * RAD_TO_DEG;
     }
@@ -411,8 +451,10 @@ void loop() {
         } else if (millis() - timerBattery > 100) {
             if (RemoteXY.joyYT_y == 100)
                 incrementPID = 1.0f;
+            else if (RemoteXY.joyYT_y == -100)
+                incrementPID = 0.001f;
             else
-                incrementPID = 0.01f;
+                incrementPID = 0.01;
 
             switch (RemoteXY.btnSelect) {
                 case 0:
@@ -434,7 +476,7 @@ void loop() {
                         --trimRoll;
                     break;
                 case 3:
-                    dtostrf(prP, 1, 2, buf0);
+                    dtostrf(prP, 1, 3, buf0);
                     snprintf_P(RemoteXY.textField, sizeof(RemoteXY.textField), PSTR("prP:%s"), buf0);
                     if (RemoteXY.btnGreen)
                         prP += incrementPID;
@@ -442,7 +484,7 @@ void loop() {
                         prP -= incrementPID;
                     break;
                 case 4:
-                    dtostrf(prI, 1, 2, buf0);
+                    dtostrf(prI, 1, 3, buf0);
                     snprintf_P(RemoteXY.textField, sizeof(RemoteXY.textField), PSTR("prI:%s"), buf0);
                     if (RemoteXY.btnGreen)
                         prI += incrementPID;
@@ -450,7 +492,7 @@ void loop() {
                         prI -= incrementPID;
                     break;
                 case 5:
-                    dtostrf(prD, 1, 2, buf0);
+                    dtostrf(prD, 1, 3, buf0);
                     snprintf_P(RemoteXY.textField, sizeof(RemoteXY.textField), PSTR("prD:%s"), buf0);
                     if (RemoteXY.btnGreen)
                         prD += incrementPID;
@@ -458,7 +500,7 @@ void loop() {
                         prD -= incrementPID;
                     break;
                 case 6:
-                    dtostrf(yP, 1, 2, buf0);
+                    dtostrf(yP, 1, 3, buf0);
                     snprintf_P(RemoteXY.textField, sizeof(RemoteXY.textField), PSTR("yP:%s"), buf0);
                     if (RemoteXY.btnGreen)
                         yP += incrementPID;
@@ -466,7 +508,7 @@ void loop() {
                         yP -= incrementPID;
                     break;
                 case 7:
-                    dtostrf(yI, 1, 2, buf0);
+                    dtostrf(yI, 1, 3, buf0);
                     snprintf_P(RemoteXY.textField, sizeof(RemoteXY.textField), PSTR("yI:%s"), buf0);
                     if (RemoteXY.btnGreen)
                         yI += incrementPID;
@@ -474,7 +516,7 @@ void loop() {
                         yI -= incrementPID;
                     break;
                 case 8:
-                    dtostrf(yD, 1, 2, buf0);
+                    dtostrf(yD, 1, 3, buf0);
                     snprintf_P(RemoteXY.textField, sizeof(RemoteXY.textField), PSTR("yD:%s"), buf0);
                     if (RemoteXY.btnGreen)
                         yD += incrementPID;
@@ -536,7 +578,7 @@ void loop() {
                 snprintf_P(RemoteXY.textField, sizeof(RemoteXY.textField), PSTR("%sV"), buf0);
                 break;
             case 1:
-                dtostrf(yawDeg, 3, 1, buf0);
+                dtostrf(yawDps, 3, 1, buf0);
                 dtostrf(pitchDeg, 3, 1, buf1);
                 dtostrf(rollDeg, 3, 1, buf2);
                 snprintf_P(RemoteXY.textField, sizeof(RemoteXY.textField), PSTR("Y:%s;P:%s;R:%s"), buf0, buf1, buf2);
@@ -549,23 +591,31 @@ void loop() {
                 snprintf_P(RemoteXY.textField, sizeof(RemoteXY.textField), PSTR("joyY:%s;P:%s;R:%s;T:%d"), buf0, buf1, buf2, throttle);
                 break;
             case 3:
-                dtostrf(pitchPID.GetPterm(), 1, 3, buf0);
-                dtostrf(rollPID.GetPterm(), 1, 3, buf1);
-                snprintf_P(RemoteXY.textField, sizeof(RemoteXY.textField), PSTR("pPT:%s;rPT:%s"), buf0, buf1);
+                dtostrf(yawPID.GetPterm(), 1, 2, buf0);
+                dtostrf(pitchPID.GetPterm(), 1, 2, buf1);
+                dtostrf(rollPID.GetPterm(), 1, 2, buf2);
+                snprintf_P(RemoteXY.textField, sizeof(RemoteXY.textField), PSTR("yP:%s;pP:%s;rP:%s"), buf0, buf1, buf2);
                 break;
             case 4:
-                dtostrf(pitchPID.GetDterm(), 1, 3, buf0);
-                dtostrf(rollPID.GetDterm(), 1, 3, buf1);
-                snprintf_P(RemoteXY.textField, sizeof(RemoteXY.textField), PSTR("pDT:%s;rDT:%s"), buf0, buf1);
+                dtostrf(pitchPID.GetIterm(), 1, 2, buf0);
+                dtostrf(rollPID.GetIterm(), 1, 2, buf1);
+                snprintf_P(RemoteXY.textField, sizeof(RemoteXY.textField), PSTR("pI:%s;rI:%s"), buf0, buf1);
                 break;
             case 5:
-                dtostrf(pitchOutput, 1, 1, buf0);
-                dtostrf(rollOutput, 1, 1, buf1);
-                snprintf_P(RemoteXY.textField, sizeof(RemoteXY.textField), PSTR("pout:%s;rout:%s"), buf0, buf1);
+                dtostrf(yawPID.GetDterm(), 1, 2, buf0);
+                dtostrf(pitchPID.GetDterm(), 1, 2, buf1);
+                dtostrf(rollPID.GetDterm(), 1, 2, buf2);
+                snprintf_P(RemoteXY.textField, sizeof(RemoteXY.textField), PSTR("yD:%s;pD:%s;rD:%s"), buf0, buf1, buf2);
                 break;
             case 6:
-                dtostrf(yawDps, 1, 1, buf0);
-                snprintf_P(RemoteXY.textField, sizeof(RemoteXY.textField), PSTR("yawDps: %s"), buf0);
+                dtostrf(pitchOutput, 1, 1, buf0);
+                dtostrf(rollOutput, 1, 1, buf1);
+                dtostrf(yawOutput, 1, 1, buf3);
+                snprintf_P(RemoteXY.textField, sizeof(RemoteXY.textField), PSTR("outP:%s;R:%s;Y:%s"), buf0, buf1, buf3);
+                break;
+            case 9:
+                if (RemoteXY.textField[0] != 0)
+                    strcpy(RemoteXY.textField, "");
                 break;
             default:
                 snprintf_P(RemoteXY.textField, sizeof(RemoteXY.textField), PSTR("FL:%d;FR:%d;BL:%d;BR:%d"), FLspeed, FRspeed, BLspeed, BRspeed);
