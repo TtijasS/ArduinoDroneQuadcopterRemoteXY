@@ -290,10 +290,17 @@ void setPIDincrements() {
 /////////////////////////////////////////////
 void setup() {
     // Setup motor PWM frequency from 490 Hz to 31.4 kHz
-    TCCR1A = 0b00000001;  // Pins D9, D10 to 8bit phase correct
-    TCCR1B = 0b00000001;  //
-    TCCR2B = 0b00000001;  // Pins D3, D11 to 8bit phase correct
-    TCCR2A = 0b00000001;  // phase correct -> count up 8-bit, count down 8-bit (2*256)
+    // TCCR1A = 0b00000001;  // Pins D9, D10 to 8bit phase correct
+    // TCCR1B = 0b00000001;  //
+    // TCCR2B = 0b00000001;  // Pins D3, D11 to 8bit phase correct
+    // TCCR2A = 0b00000001;  // phase correct -> count up 8-bit, count down 8-bit (2*256)
+
+    // Setup PWM frequency from 490 Hz to 62.5 kHz
+    TCCR1A = 0b00000001;  // Pins D9 and D10 to 8-bit
+    TCCR1B = 0b00001001;  // x1 fast pwm
+
+    TCCR2A = 0b00000011;  // Pins D3 and D11 to 8-bit
+    TCCR2B = 0b00000001;  // x1 fast pwm
 
     // // Motor pins setup
     // // https://docs.arduino.cc/hacking/software/PortManipulation
