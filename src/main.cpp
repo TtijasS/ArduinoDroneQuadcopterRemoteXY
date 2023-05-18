@@ -99,8 +99,8 @@ const float yawOutLimits{15.0f};    // yaw PID output limits
 
 // JOYSTICK LIMITS
 // Y, P, R and throttle controller limits
-float yawLimit{0.3f}, pitchLimit{0.1f}, rollLimit{0.1f}, throtleLimit{200};  // map(input, 0, 100, 0, limit)
-int yawDeadzone{15};                                                         // from -x to x controller does nothing
+float yawLimit{0.5f}, pitchLimit{0.25f}, rollLimit{0.25f}, throtleLimit{200};  // map(input, 0, 100, 0, limit)
+int yawDeadzone{15};                                                           // from -x to x controller does nothing
 // because pitchPID output limit is 25, roll is 25 and yaw is 10 == 25 + 25 + 10
 // joystick throttle goes from 0 to 100. 100 * 1.95 = 195 throttle + 60 in worst case scenario for PID corrections
 int throttle{0};  // RemoteXY.joyYT_y * throttleLimit
@@ -112,9 +112,9 @@ bool yawInvertOutput{0};  // invert yawOutput when yawDeg < 0 so we never encoun
 /////////////////////////////////////////////
 //               PID TUNINGS               //
 /////////////////////////////////////////////
-float prP{0.38f}, prI{0.03f}, prD{0.14f};  // Pitch&Roll kp, ki, kd .3, .02, .11
-float yP{0.3f}, yI{0.0f}, yD{0.0f};        // Yaw kp ki kd	2.5, 0, 0
-int trimRoll{0}, trimPitch{0};             // trim values (if drone is leaning, you can correct with theese)
+float prP{0.5f}, prI{0.04f}, prD{0.14f};  // Pitch&Roll kp, ki, kd .3, .02, .11
+float yP{0.3f}, yI{0.0f}, yD{0.0f};       // Yaw kp ki kd	2.5, 0, 0
+int trimRoll{0}, trimPitch{0};            // trim values (if drone is leaning, you can correct with theese)
 
 // for turning off I term when error is too big
 bool pitchIswitch{0}, rollIswitch{0};
@@ -211,23 +211,7 @@ void calculateSetpoint() {
         throttle = map(RemoteXY.joyYT_y, -100, 100, 0, throtleLimit);
         if ((RemoteXY.joyYT_x <= -yawDeadzone) || (RemoteXY.joyYT_x >= yawDeadzone)) {
             yawSetpoint = RemoteXY.joyYT_x * (-yawLimit);
-            // completentary filter taking 95% of position from previous Setpoint and adding 5% from the new desired point
-            // It prevents quad from yawing when joystick yaw is 0
-            // yawDeg + RemoteXY.joyYT_x * yawLimit follows drones current yaw rotation and adds desired offset
-            // yawSetpoint = (yawSetpoint * 0.7f) + (yawDeg + RemoteXY.joyYT_x * yawLimit) * 0.3f;
-            // if (yawInvertOutput)
-            // 	yawSetpoint *= -1;
-            // else
-
-            // if (yawSetpoint > 180){
-            // 	yawSetpoint
-            // }
-            // if (yawSetpoint > 180)
-            //     yawSetpoint -= 360;
-            // else if (yawSetpoint < -180)
-            //     yawSetpoint += 360;
         } else {
-            // yawSetpoint = (yawSetpoint * 0.9f) + (yawDeg * 0.1f);
             yawSetpoint = 0;
         }
         timerSetpoint = millis();
@@ -236,8 +220,8 @@ void calculateSetpoint() {
 
 void pitchITermSwitch(int maxErr) {
     float pitchErr = abs(pitchSetpoint - pitchDeg);
-    // pitchIswitch == 0 - normal pitchPID mode (all terms in use)
-    // pitchIswitch == 1 - no I term pitchPID mode
+    // when pitchIswitch == 0 - normal pitchPID mode (all terms in use)
+    // when pitchIswitch == 1 - no I term pitchPID mode
     if (pitchIswitch == 0 && pitchErr > maxErr) {
         pitchPID.SetTunings(prP, 0.0f, prD);
         pitchIswitch = 1;
@@ -249,8 +233,8 @@ void pitchITermSwitch(int maxErr) {
 
 void rollITermSwitch(int maxErr) {
     float rollErr = abs(rollSetpoint - rollDeg);
-    // rollIswitch == 0 - normal pitchPID mode (all terms in use)
-    // rollIswitch == 1 - no I term pitchPID mode
+    // when rollIswitch == 0 - normal pitchPID mode (all terms in use)
+    // when rollIswitch == 1 - no I term pitchPID mode
     if (rollIswitch == 0 && rollErr > maxErr) {
         rollPID.SetTunings(prP, 0.0f, prD);
         rollIswitch = 1;
@@ -301,19 +285,6 @@ void setup() {
 
     TCCR2A = 0b00000011;  // Pins D3 and D11 to 8-bit
     TCCR2B = 0b00000001;  // x1 fast pwm
-
-    // // Motor pins setup
-    // // https://docs.arduino.cc/hacking/software/PortManipulation
-    // // 		 | 7 |6 |5 | 4 | 3 | 2 | 1| 0 |	(bits of 8-bit register)
-    // // DDRD = {7, 6, 5,  4,  3,  2,  1, 0}	(pinout map of register D)
-    // // DDRB = {?, ?, 13, 12, 11, 10, 9, 8}	(pinout map of register B)
-    // // (FLmotor, OUTPUT); front left ; DDRD pin 3
-    // DDRD |= 0b00001000;
-
-    // // pinMode(BLmotor, OUTPUT);  back left ; DDRB pin 9
-    // // pinMode(BRmotor, OUTPUT);  back right ; DDRB pin 10
-    // // pinMode(FRmotor, OUTPUT);  front right ; DDRB pin 11
-    // DDRB |= 0b00001110;
 
     // join I2C bus (I2Cdev library doesn't do this automatically)
 #if I2CDEV_IMPLEMENTATION == I2CDEV_ARDUINO_WIRE
