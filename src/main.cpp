@@ -77,7 +77,7 @@ char buf3[10];
 //                  PID                    //
 /////////////////////////////////////////////
 
-#define CAL_N 6  // number of calibration cicles (1 = 100 samples)
+#define CAL_N 10  // number of calibration cicles (1 = 100 samples)
 // how to connect the motrs (pin numbers ; PCB connector number)
 // (3)	 (11)	(CN1)	(CN4)
 //     X			  X
@@ -94,12 +94,12 @@ int BLspeed{0};
 int BRspeed{0};
 
 const uint32_t sampleTimeUs{6000};  // 1000 us = 1 ms
-const float prOutLimits{15.0f};     // pitch and roll PID output limits
-const float yawOutLimits{15.0f};    // yaw PID output limits
+const float prOutLimits{20.0f};     // pitch and roll PID output limits
+const float yawOutLimits{20.0f};    // yaw PID output limits
 
 // JOYSTICK LIMITS
 // Y, P, R and throttle controller limits
-float yawLimit{0.5f}, pitchLimit{0.25f}, rollLimit{0.25f}, throtleLimit{200};  // map(input, 0, 100, 0, limit)
+float yawLimit{0.7f}, pitchLimit{0.25f}, rollLimit{0.25f}, throtleLimit{200};  // map(input, 0, 100, 0, limit)
 int yawDeadzone{15};                                                           // from -x to x controller does nothing
 // because pitchPID output limit is 25, roll is 25 and yaw is 10 == 25 + 25 + 10
 // joystick throttle goes from 0 to 100. 100 * 1.95 = 195 throttle + 60 in worst case scenario for PID corrections
@@ -112,12 +112,13 @@ bool yawInvertOutput{0};  // invert yawOutput when yawDeg < 0 so we never encoun
 /////////////////////////////////////////////
 //               PID TUNINGS               //
 /////////////////////////////////////////////
-float prP{0.5f}, prI{0.04f}, prD{0.14f};  // Pitch&Roll kp, ki, kd .3, .02, .11
-float yP{0.3f}, yI{0.0f}, yD{0.0f};       // Yaw kp ki kd	2.5, 0, 0
-int trimRoll{0}, trimPitch{0};            // trim values (if drone is leaning, you can correct with theese)
+float prP{0.38f}, prI{0.025f}, prD{0.11f};  // Pitch&Roll kp, ki, kd .38, .03, .11
+float yP{0.65f}, yI{0.0f}, yD{0.0f};        // Yaw kp ki kd	.65, 0, 0
+int trimRoll{0}, trimPitch{0};              // trim values (if drone is leaning, you can correct with theese)
 
 // for turning off I term when error is too big
 bool pitchIswitch{0}, rollIswitch{0};
+const int errorThreshold{20};  // max error in degrees before I term is turned off
 
 // -Left trimRoll Right+	(direction of the nose)	+Up trimPitch Down-
 // Turn on the drone and sellect YPR output... test
@@ -246,8 +247,8 @@ void rollITermSwitch(int maxErr) {
 
 void computePID() {
     if (micros() - timerPID >= sampleTimeUs) {
-        pitchITermSwitch(20);  // turn off pitch I term when error is bigger than maxErr value
-        rollITermSwitch(20);   // turn off roll I term when error is bigger than maxErr value
+        pitchITermSwitch(errorThreshold);  // turn off pitch I term when error is bigger than maxErr value
+        rollITermSwitch(errorThreshold);   // turn off roll I term when error is bigger than maxErr value
         yawPID.Compute();
         pitchPID.Compute();
         rollPID.Compute();
@@ -329,17 +330,17 @@ void setup() {
 
     // MPU6050 init, setup and calibration
     devStatus = mpu.dmpInitialize();
-    mpu.setXAccelOffset(155);  // replace these with your own offsets
-    mpu.setYAccelOffset(-2485);
-    mpu.setZAccelOffset(1733);
+    mpu.setXAccelOffset(127);  // replace these with your own offsets
+    mpu.setYAccelOffset(-2497);
+    mpu.setZAccelOffset(1773);
     mpu.setXGyroOffset(-93);
-    mpu.setYGyroOffset(19);
-    mpu.setZGyroOffset(59);
+    mpu.setYGyroOffset(16);
+    mpu.setZGyroOffset(60);
     // Serial.println(mpu.testConnection() ? F("MPU6050 connection successful") : F("MPU6050 connection failed"));
     if (devStatus == 0) {
         // Serial.println(F("Calibrating"));
-        mpu.CalibrateAccel(CAL_N);
-        mpu.CalibrateGyro(CAL_N);
+        // mpu.CalibrateAccel(CAL_N);
+        // mpu.CalibrateGyro(CAL_N);
 
         /*
                 -- READ THIS --
