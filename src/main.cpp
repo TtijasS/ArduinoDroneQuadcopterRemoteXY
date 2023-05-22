@@ -112,7 +112,7 @@ bool yawInvertOutput{0};  // invert yawOutput when yawDeg < 0 so we never encoun
 /////////////////////////////////////////////
 //               PID TUNINGS               //
 /////////////////////////////////////////////
-float prP{0.38f}, prI{0.025f}, prD{0.11f};  // Pitch&Roll kp, ki, kd .38, .03, .11
+float prP{0.38f}, prI{0.027f}, prD{0.11f};  // Pitch&Roll kp, ki, kd .38, .03, .11
 float yP{0.65f}, yI{0.0f}, yD{0.0f};        // Yaw kp ki kd	.65, 0, 0
 int trimRoll{0}, trimPitch{0};              // trim values (if drone is leaning, you can correct with theese)
 
