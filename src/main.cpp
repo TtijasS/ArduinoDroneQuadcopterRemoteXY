@@ -1,612 +1,731 @@
+//////////////////////////////////////////////
+//        RemoteXY include library          //
+//////////////////////////////////////////////
+
+// #define REMOTEXY__DEBUGLOG
+#define REMOTEXY_MODE__HARDSERIAL
+
+#define REMOTEXY_SERIAL Serial
+#define REMOTEXY_SERIAL_SPEED 115200
+
+#include <RemoteXY.h>
+
+#pragma pack(push, 1)
+uint8_t RemoteXY_CONF[] =
+{
+  255,8,0,25,0,83,0,19,0,0,0,0,31,1,200,84,1,1,7,0,
+  1,56,10,9,9,0,120,31,0,3,72,9,126,14,138,2,26,5,
+  14,31,53,53,1,2,26,31,10,3,1,13,13,48,4,26,31,
+  79,78,0,31,79,70,70,0,5,134,31,53,53,0,2,26,31,
+  1,42,14,9,9,0,35,31,0,67,23,0,166,9,68,2,26,25
+};
+
+struct
+{
+  // Input variables
+  uint8_t btnGreen;
+  uint8_t btnSelect;
+  int8_t  joyRP_x;
+  int8_t  joyRP_y;
+  uint8_t onOff;
+  int8_t  joyYT_x;
+  int8_t  joyYT_y;
+  uint8_t btnRed;
+
+  // Output variable
+  char textField[25];
+
+  // Other
+  uint8_t connect_flag;
+
+} RemoteXY;
+#pragma pack(pop)
+
+/////////////////////////////////////////////
+//           END RemoteXY include          //
+/////////////////////////////////////////////
+
 #include <Arduino.h>
 #include <I2Cdev.h>
 #include <MPU6050_6Axis_MotionApps20.h>
 #include <QuickPID.h>
 
 #if I2CDEV_IMPLEMENTATION == I2CDEV_ARDUINO_WIRE
-#include "Wire.h"
+  #include "Wire.h"
 #endif
-// Arduino Wire library is required if I2Cdev I2CDEV_ARDUINO_WIRE implementation is used in I2Cdev.h
 
-/////////////////////////////////////////////
-//                 RemoteXY                //
-/////////////////////////////////////////////
-// RemoteXY select connection mode and include library
-#define REMOTEXY_MODE__HARDSERIAL
+////////////////////////////////////////////////
+//           GLOBAL CONSTANTS & DEFINES       //
+////////////////////////////////////////////////
 
-#include <RemoteXY.h>
+// Controls how much the PID parameters will be incremented/decremented
+float pid_increment { 0.0f };
 
-// RemoteXY connection settings
-#define REMOTEXY_SERIAL Serial
-#define REMOTEXY_SERIAL_SPEED 115200
+/*
+ * Battery reading explanation:
+ *   1) Read raw ADC from A0 (0..1023).
+ *   2) Convert ADC value to voltage by multiplying with AREF_VOLTAGE_STEP.
+ *   3) Because of the external voltage divider, multiply by VOLT_DIV_SCALING_FACTOR.
+ *   4) Filter with alpha = 0.05 for noise reduction.
+ */
+const float BATTERY_FILTER_ALPHA   { 0.05f };
+const float AREF_OFFSET            { -0.03f };
+const float AREF_VOLTAGE           { 1.1f + AREF_OFFSET };
+const float AREF_VOLTAGE_STEP      = AREF_VOLTAGE / 1023.0f;
+const float VOLT_DIV_SCALING_FACTOR= (100.0f + 33.0f) / 33.0f;
 
-// RemoteXY configurate
-#pragma pack(push, 1)
-uint8_t RemoteXY_CONF[] =  // 80 bytes
-    {255, 8, 0, 25, 0, 73, 0, 16, 31, 0, 1, 0, 26, 8, 7, 7, 120, 31, 0, 3,
-     138, 37, 8, 63, 7, 2, 26, 5, 1, 0, 23, 40, 40, 2, 26, 31, 10, 48, 0, 0,
-     10, 10, 4, 26, 31, 79, 78, 0, 31, 79, 70, 70, 0, 5, 0, 60, 23, 40, 40, 2,
-     26, 31, 1, 0, 19, 12, 7, 7, 35, 31, 0, 67, 4, 13, 0, 83, 7, 2, 26, 25};
+/*
+ * Motor PWM limits. If your ESCs won't spin the motor below 6 or if you want 
+ * some margin, set MOTOR_PWM_MIN > 0. MOTOR_PWM_MAX = 255 for 8-bit output.
+ */
+static const int MOTOR_PWM_MIN { 6 };
+static const int MOTOR_PWM_MAX { 255 };
 
-// this structure defines all the variables and events of your control interface
-struct {
-    // input variables
-    uint8_t btnGreen;   // =1 if button pressed, else =0
-    uint8_t btnSelect;  // =0 if select position A, =1 if position B, =2 if position C, ...
-    int8_t joyRP_x;     // from -100 to 100
-    int8_t joyRP_y;     // from -100 to 100
-    uint8_t onOff;      // =1 if state is ON, else =0
-    int8_t joyYT_x;     // from -100 to 100
-    int8_t joyYT_y;     // from -100 to 100
-    uint8_t btnRed;     // =1 if button pressed, else =0
+/*
+ * Battery failsafe threshold. If battery < CRITICAL_BATTERY_VOLTAGE, 
+ * we forcibly disarm (if armed) or won't allow arming (if disarmed).
+ */
+static const float CRITICAL_BATTERY_VOLTAGE { 3.5f };
 
-    // output variables
-    char textField[25];  // string UTF8 end zero
+// How often to compute PID (microseconds)
+static const uint32_t CALC_PID_DELTA_MICROS { 6000 };
 
-    // other variable
-    uint8_t connect_flag;  // =1 if wire connected, else =0
+// Separate pitch & roll I-term thresholds
+static const int PITCH_ERROR_THRESHOLD { 20 };
+static const int ROLL_ERROR_THRESHOLD  { 20 };
 
-} RemoteXY;
-#pragma pack(pop)
-/////////////////////////////////////////////
-//                 Battery                 //
-/////////////////////////////////////////////
-// 4.2 V ~ full battery
-// 4.2 V ~ 5 V on analogRead(A0) pin
-// on Nano A0 to A7 hav max resolution 10 bit
-// Voltage values between 0 and 5 V are mapped on spectrum from 0 to 1023 bit
-// map(0, 5, 0, 1023)
-// 4.2 V equals 4200 mV => multiplier calculation
-const float bat_alpha{0.05};  // complementary filter alpha for noise reduction (example 0.9 % old reading + 0.1 % new)
-const float multiplier{4.3};  // 4200 / 1023 = 4.10557 (mine was 2 V short, so i raised multiplier by .2)
-float incrementPID{0.01f};    // how much the PID parameter will be incremented/ decremented
+// PID tunings
+float pr_p { 0.38f }, pr_i { 0.028f }, pr_d { 0.11f };  // Pitch & Roll
+float y_p  { 0.65f }, y_i  { 0.0f   }, y_d  { 0.0f   };  // Yaw
 
-float batteryVoltage{0.0f};  // the smoothed value that we output
-bool computeBattery{0};
-unsigned long timerBattery{0};   // computer smooth battery value every x millis, so RemoteXY doesn't update edit field every loop
-unsigned long timerSetpoint{0};  // read battery every x seconds
-unsigned long timerPID{0};       // timer for PID calculations
-bool armDisarm{0};               // enable or dissable drone throttle
+static const float PR_OUTPUT_LIMITS { 20.0f };
+static const float YAW_OUTPUT_LIMITS{ 20.0f };
 
-// buffers for converting floats to string
-char buf0[10];
-char buf1[10];
-char buf2[10];
-char buf3[10];
-/////////////////////////////////////////////
-//                  PID                    //
-/////////////////////////////////////////////
+// Joystick
+float yaw_limit      { 0.7f  };
+float pitch_limit    { 0.25f };
+float roll_limit     { 0.25f };
+float throttle_limit { 200.0f };
+int   yaw_deadzone   { 15 };
 
-#define CAL_N 10  // number of calibration cicles (1 = 100 samples)
-// how to connect the motrs (pin numbers ; PCB connector number)
-// (3)	 (11)	(CN1)	(CN4)
-//     X			  X
-// (9)	 (10)	(CN2)	(CN3)
-static const int FLmotor{3};
-static const int FRmotor{11};
-static const int BLmotor{9};
-static const int BRmotor{10};
+// MPU calibration
+static const int CAL_ITERATIONS { 10 }; // how many times to calibrate
 
-// Stores the PWM output value
-int FLspeed{0};
-int FRspeed{0};
-int BLspeed{0};
-int BRspeed{0};
+////////////////////////////////////////////////
+//             GLOBAL VARIABLES              //
+////////////////////////////////////////////////
 
-const uint32_t sampleTimeUs{6000};  // 1000 us = 1 ms
-const float prOutLimits{20.0f};     // pitch and roll PID output limits
-const float yawOutLimits{20.0f};    // yaw PID output limits
+// Battery / timers
+float g_battery_voltage { 0.0f };
+unsigned long g_timer_battery  { 0 };
+unsigned long g_timer_setpoint { 0 };
+unsigned long g_timer_pid      { 0 };
 
-// JOYSTICK LIMITS
-// Y, P, R and throttle controller limits
-float yawLimit{0.7f}, pitchLimit{0.25f}, rollLimit{0.25f}, throtleLimit{200};  // map(input, 0, 100, 0, limit)
-int yawDeadzone{15};                                                           // from -x to x controller does nothing
-// because pitchPID output limit is 25, roll is 25 and yaw is 10 == 25 + 25 + 10
-// joystick throttle goes from 0 to 100. 100 * 1.95 = 195 throttle + 60 in worst case scenario for PID corrections
-int throttle{0};  // RemoteXY.joyYT_y * throttleLimit
-float rollSetpoint{0.0f}, rollInput{0.0f}, rollOutput{0.0f};
-float pitchSetpoint{0.0f}, pitchInput{0.0f}, pitchOutput{0.0f};
-float yawSetpoint{0.0f}, yawInput{0.0f}, yawOutput{0.0f};
-bool yawInvertOutput{0};  // invert yawOutput when yawDeg < 0 so we never encounter transition from 180 to -180, which makes PID go crazy
+// Arming
+bool g_is_armed { false };
 
-/////////////////////////////////////////////
-//               PID TUNINGS               //
-/////////////////////////////////////////////
-float prP{0.38f}, prI{0.028f}, prD{0.11f};  // Pitch&Roll kp, ki, kd .38, .03, .11
-float yP{0.65f}, yI{0.0f}, yD{0.0f};        // Yaw kp ki kd	.65, 0, 0
-int trimRoll{0}, trimPitch{0};              // trim values (if drone is leaning, you can correct with theese)
+// Buffers for float-to-string
+char g_buffer0[10];
+char g_buffer1[10];
+char g_buffer2[10];
+char g_buffer3[10];
 
-// for turning off I term when error is too big
-bool pitchIswitch{0}, rollIswitch{0};
-const int errorThreshold{20};  // max error in degrees before I term is turned off
+// Motor pins
+const int PIN_FL_MOTOR { 3 };
+const int PIN_FR_MOTOR { 11 };
+const int PIN_BL_MOTOR { 9 };
+const int PIN_BR_MOTOR { 10 };
 
-// -Left trimRoll Right+	(direction of the nose)	+Up trimPitch Down-
-// Turn on the drone and sellect YPR output... test
+// Motor speeds
+int fl_speed { 0 };
+int fr_speed { 0 };
+int bl_speed { 0 };
+int br_speed { 0 };
 
-/////////////////////////////////////////////
-//                   MPU                   //
-/////////////////////////////////////////////
+// Switches for turning off I-term
+bool pitch_i_switch { false };
+bool roll_i_switch  { false };
+
+// Joystick setpoints
+int   g_throttle     { 0 };
+float yaw_setpoint   { 0.0f };
+float pitch_setpoint { 0.0f };
+float roll_setpoint  { 0.0f };
+float yaw_output     { 0.0f };
+float pitch_output   { 0.0f };
+float roll_output    { 0.0f };
+int   trim_pitch     { 0 };
+int   trim_roll      { 0 };
+
+// MPU / DMP
 MPU6050 mpu;
-// MPU control/status vars
-bool dmpReady = false;   // set true if DMP init was successful
-uint8_t mpuIntStatus;    // holds actual interrupt status byte from MPU
-uint8_t devStatus;       // return status after each device operation (0 = success, !0 = error)
-uint16_t packetSize;     // expected DMP packet size (default is 42 bytes)
-uint16_t fifoCount;      // count of all bytes currently in FIFO
-uint8_t fifoBuffer[64];  // FIFO storage buffer
+bool     g_mpu_interrupt { false };
+bool     g_dmp_ready     { false };
+uint8_t  g_mpu_int_status;
+uint8_t  g_dev_status;
+uint16_t g_packet_size;
+uint16_t g_fifo_count;
+uint8_t  g_fifo_buffer[64];
 
-// orientation/motion vars
-Quaternion q;                         // [w, x, y, z]			quaternion container
-VectorInt16 rot;                      // [x, y, z]				angular velocity
-VectorInt16 aa;                       // [x, y, z]				accel sensor measurements
-VectorInt16 aaReal;                   // [x, y, z]				gravity-free accel sensor measurements
-VectorInt16 aaWorld;                  // [x, y, z]				world-frame accel sensor measurements
-VectorFloat gravity;                  // [x, y, z]				gravity vector
-float euler[3];                       // [psi, theta, phi]		Euler angle container
-float ypr[3];                         // [yaw, pitch, roll]		yaw/pitch/roll container and gravity vector
-float pitchDeg{0.0f}, rollDeg{0.0f};  // yawDeg{0.0f},
-float yawDps{0};                      // yaw in degrees per second
+// Orientation / motion
+Quaternion  g_q;
+VectorInt16 g_rot;
+VectorInt16 g_aa;
+VectorInt16 g_aa_real;
+VectorInt16 g_aa_world;
+VectorFloat g_gravity;
+float       g_ypr[3];
+float       g_pitch_deg { 0.0f };
+float       g_roll_deg  { 0.0f };
+float       g_yaw_dps   { 0.0f };
 
-// ===               INTERRUPT DETECTION ROUTINE                ===
-volatile bool mpuInterrupt = false;  // indicates whether MPU interrupt pin has gone high
-void dmpDataReady() {
-    mpuInterrupt = true;
+// QuickPID objects
+QuickPID yaw_pid   (&g_yaw_dps,   &yaw_output,   &yaw_setpoint);
+QuickPID pitch_pid (&g_pitch_deg, &pitch_output, &pitch_setpoint);
+QuickPID roll_pid  (&g_roll_deg,  &roll_output,  &roll_setpoint);
+
+////////////////////////////////////////////////
+//          INTERRUPT SERVICE ROUTINE        //
+////////////////////////////////////////////////
+void on_dmp_data_ready()
+{
+  g_mpu_interrupt = true;
 }
 
-QuickPID yawPID(&yawDps, &yawOutput, &yawSetpoint);
-QuickPID pitchPID(&pitchDeg, &pitchOutput, &pitchSetpoint);
-QuickPID rollPID(&rollDeg, &rollOutput, &rollSetpoint);
+////////////////////////////////////////////////
+//            CUSTOM HELPER FUNCTIONS        //
+////////////////////////////////////////////////
 
-// /////////////////////////////////////////////
-//               Custom functions          //
-/////////////////////////////////////////////
-
-void smoothBat() {
-    // reads the new battery value and smoothes it with bat_alpha param
-    // float batReading = analogRead(A0) / 1023.0 * multiplier;
-    batteryVoltage = (1.0f - bat_alpha) * batteryVoltage + (bat_alpha * analogRead(A0) / 1023.0f * multiplier);
-    // if (millis() - timerBattery >= 253) {
-    //     timerBattery = millis();
-    // }
+/**
+ * @brief Smooth the battery reading with a complementary filter.
+ */
+void smooth_battery()
+{
+  float battery_reading = analogRead(A0) * AREF_VOLTAGE_STEP * VOLT_DIV_SCALING_FACTOR;
+  g_battery_voltage = g_battery_voltage * (1.0f - BATTERY_FILTER_ALPHA) 
+                      + battery_reading * BATTERY_FILTER_ALPHA;
 }
 
-// Calculates motor PWM values by taking throttle and +- PID outputs
-// values are stored in FRspeed, FLspeed, ...
-void calculateELMspeed() {
-    if (armDisarm == 1) {
-        FLspeed = throttle + pitchOutput + rollOutput + yawOutput;  // front left (CW)
-        FRspeed = throttle + pitchOutput - rollOutput - yawOutput;  // back	left (CCW)
-        BLspeed = throttle - pitchOutput + rollOutput - yawOutput;  // front right (CCW)
-        BRspeed = throttle - pitchOutput - rollOutput + yawOutput;  // back	right (CW)
+/**
+ * @brief Calculate individual motor speeds by combining throttle & PID outputs,
+ *        then constrain them to MOTOR_PWM_MIN..MOTOR_PWM_MAX.
+ */
+void calculate_motor_speed()
+{
+  if (g_is_armed)
+  {
+    fl_speed = g_throttle + pitch_output + roll_output + yaw_output;
+    fr_speed = g_throttle + pitch_output - roll_output - yaw_output;
+    bl_speed = g_throttle - pitch_output + roll_output - yaw_output;
+    br_speed = g_throttle - pitch_output - roll_output + yaw_output;
 
-        if (FLspeed < 6) FLspeed = 6;
-        if (FRspeed < 6) FRspeed = 6;
-        if (BLspeed < 6) BLspeed = 6;
-        if (BRspeed < 6) BRspeed = 6;
-
-        if (FLspeed > 255) FLspeed = 255;
-        if (FRspeed > 255) FRspeed = 255;
-        if (BLspeed > 255) BLspeed = 255;
-        if (BRspeed > 255) BRspeed = 255;
-
-    } else {
-        FLspeed = 0;
-        FRspeed = 0;
-        BLspeed = 0;
-        BRspeed = 0;
-    }
-};
-
-// Update desired motor speeds from FLspeed, FRspeed,...
-void setELMspeed() {
-    analogWrite(FLmotor, FLspeed);
-    analogWrite(FRmotor, FRspeed);
-    analogWrite(BLmotor, BLspeed);
-    analogWrite(BRmotor, BRspeed);
+    // Constrain using Arduino's constrain function
+    fl_speed = constrain(fl_speed, MOTOR_PWM_MIN, MOTOR_PWM_MAX);
+    fr_speed = constrain(fr_speed, MOTOR_PWM_MIN, MOTOR_PWM_MAX);
+    bl_speed = constrain(bl_speed, MOTOR_PWM_MIN, MOTOR_PWM_MAX);
+    br_speed = constrain(br_speed, MOTOR_PWM_MIN, MOTOR_PWM_MAX);
+  }
+  else
+  {
+    fl_speed = 0;
+    fr_speed = 0;
+    bl_speed = 0;
+    br_speed = 0;
+  }
 }
 
-void calculateSetpoint() {
-    if (millis() - timerSetpoint > 50) {
-        rollSetpoint = (RemoteXY.joyRP_x * rollLimit) + trimRoll;
-        pitchSetpoint = (RemoteXY.joyRP_y * (-pitchLimit)) + trimPitch;
-        throttle = map(RemoteXY.joyYT_y, -100, 100, 0, throtleLimit);
-        if ((RemoteXY.joyYT_x <= -yawDeadzone) || (RemoteXY.joyYT_x >= yawDeadzone)) {
-            yawSetpoint = RemoteXY.joyYT_x * (-yawLimit);
-        } else {
-            yawSetpoint = 0;
-        }
-        timerSetpoint = millis();
-    }
+/**
+ * @brief Write current motor speeds to their pins.
+ */
+void set_motor_speed()
+{
+  analogWrite(PIN_FL_MOTOR, fl_speed);
+  analogWrite(PIN_FR_MOTOR, fr_speed);
+  analogWrite(PIN_BL_MOTOR, bl_speed);
+  analogWrite(PIN_BR_MOTOR, br_speed);
 }
 
-void pitchITermSwitch(int maxErr) {
-    float pitchErr = abs(pitchSetpoint - pitchDeg);
-    // when pitchIswitch == 0 - normal pitchPID mode (all terms in use)
-    // when pitchIswitch == 1 - no I term pitchPID mode
-    if (pitchIswitch == 0 && pitchErr > maxErr) {
-        pitchPID.SetTunings(prP, 0.0f, prD);
-        pitchIswitch = 1;
-    } else if (pitchIswitch == 1 && pitchErr <= maxErr) {
-        pitchPID.SetTunings(prP, prI, prD);
-        pitchIswitch = 0;
-    }
-}
+/**
+ * @brief Refresh setpoints (roll, pitch, yaw, throttle) from RemoteXY controls.
+ */
+void calculate_setpoint()
+{
+  if (millis() - g_timer_setpoint > 50)
+  {
+    roll_setpoint  = (RemoteXY.joyRP_x * roll_limit) + trim_roll;
+    pitch_setpoint = (RemoteXY.joyRP_y * (-pitch_limit)) + trim_pitch;
+    g_throttle     = map(RemoteXY.joyYT_y, -100, 100, 0, throttle_limit);
 
-void rollITermSwitch(int maxErr) {
-    float rollErr = abs(rollSetpoint - rollDeg);
-    // when rollIswitch == 0 - normal pitchPID mode (all terms in use)
-    // when rollIswitch == 1 - no I term pitchPID mode
-    if (rollIswitch == 0 && rollErr > maxErr) {
-        rollPID.SetTunings(prP, 0.0f, prD);
-        rollIswitch = 1;
-    } else if (rollIswitch == 1 && rollErr <= maxErr) {
-        rollPID.SetTunings(prP, prI, prD);
-        rollIswitch = 0;
-    }
-}
-
-void computePID() {
-    if (micros() - timerPID >= sampleTimeUs) {
-        pitchITermSwitch(errorThreshold);  // turn off pitch I term when error is bigger than maxErr value
-        rollITermSwitch(errorThreshold);   // turn off roll I term when error is bigger than maxErr value
-        yawPID.Compute();
-        pitchPID.Compute();
-        rollPID.Compute();
-        calculateELMspeed();
-        setELMspeed();
-        timerPID = micros();
-    }
-}
-
-// If throttle stick equals 100, PID increments will change by 1.0,
-// if it's -100 (lowest position) they change by 0.001,
-// else (middle position) by 0.01
-void setPIDincrements() {
-    if (RemoteXY.joyYT_y == 100)
-        incrementPID = 1.0f;
-    else if (RemoteXY.joyYT_y == -100)
-        incrementPID = 0.001f;
+    if ((RemoteXY.joyYT_x <= -yaw_deadzone) || (RemoteXY.joyYT_x >= yaw_deadzone))
+      yaw_setpoint = RemoteXY.joyYT_x * (-yaw_limit);
     else
-        incrementPID = 0.01;
+      yaw_setpoint = 0;
+
+    g_timer_setpoint = millis();
+  }
 }
 
-/////////////////////////////////////////////
-//                  SETUP                  //
-/////////////////////////////////////////////
-void setup() {
-    // Setup motor PWM frequency from 490 Hz to 31.4 kHz
-    // TCCR1A = 0b00000001;  // Pins D9, D10 to 8bit phase correct
-    // TCCR1B = 0b00000001;  //
-    // TCCR2B = 0b00000001;  // Pins D3, D11 to 8bit phase correct
-    // TCCR2A = 0b00000001;  // phase correct -> count up 8-bit, count down 8-bit (2*256)
+/**
+ * @brief Turn off pitch PID I-term when the pitch error is large.
+ */
+void pitch_i_term_switch(int max_err)
+{
+  float pitch_err = fabs(pitch_setpoint - g_pitch_deg);
+  if (!pitch_i_switch && pitch_err > max_err)
+  {
+    pitch_pid.SetTunings(pr_p, 0.0f, pr_d);
+    pitch_i_switch = true;
+  }
+  else if (pitch_i_switch && pitch_err <= max_err)
+  {
+    pitch_pid.SetTunings(pr_p, pr_i, pr_d);
+    pitch_i_switch = false;
+  }
+}
 
-    // Setup PWM frequency from 490 Hz to 62.5 kHz
-    TCCR1A = 0b00000001;  // Pins D9 and D10 to 8-bit
-    TCCR1B = 0b00001001;  // x1 fast pwm
+/**
+ * @brief Turn off roll PID I-term when the roll error is large.
+ */
+void roll_i_term_switch(int max_err)
+{
+  float roll_err = fabs(roll_setpoint - g_roll_deg);
+  if (!roll_i_switch && roll_err > max_err)
+  {
+    roll_pid.SetTunings(pr_p, 0.0f, pr_d);
+    roll_i_switch = true;
+  }
+  else if (roll_i_switch && roll_err <= max_err)
+  {
+    roll_pid.SetTunings(pr_p, pr_i, pr_d);
+    roll_i_switch = false;
+  }
+}
 
-    TCCR2A = 0b00000011;  // Pins D3 and D11 to 8-bit
-    TCCR2B = 0b00000001;  // x1 fast pwm
+/**
+ * @brief Compute new PID outputs if enough time has elapsed.
+ */
+void compute_pid()
+{
+  if (micros() - g_timer_pid >= CALC_PID_DELTA_MICROS)
+  {
+    // Use separate thresholds for pitch & roll
+    pitch_i_term_switch(PITCH_ERROR_THRESHOLD);
+    roll_i_term_switch(ROLL_ERROR_THRESHOLD);
 
-    // join I2C bus (I2Cdev library doesn't do this automatically)
+    yaw_pid.Compute();
+    pitch_pid.Compute();
+    roll_pid.Compute();
+
+    calculate_motor_speed();
+    set_motor_speed();
+    g_timer_pid = micros();
+  }
+}
+
+/**
+ * @brief Adjust how much we increment/decrement PID parameters based on throttle.
+ */
+void set_pid_increments()
+{
+  if (RemoteXY.joyYT_y == 100)
+    pid_increment = 1.0f;
+  else if (RemoteXY.joyYT_y == -100)
+    pid_increment = 0.001f;
+  else
+    pid_increment = 0.01f;
+}
+
+/**
+ * @brief Read new MPU/DMP data if available, and filter yaw rate.
+ */
+void read_mpu_data()
+{
+  if (mpu.dmpGetCurrentFIFOPacket(g_fifo_buffer))
+  {
+    mpu.dmpGetQuaternion(&g_q, g_fifo_buffer);
+    mpu.dmpGetGravity(&g_gravity, &g_q);
+    mpu.dmpGetYawPitchRoll(g_ypr, &g_q, &g_gravity);
+    mpu.dmpGetGyro(&g_rot, g_fifo_buffer);
+
+    // Complementary filter for yaw DPS
+    g_yaw_dps   = (g_yaw_dps * 0.8f) + (g_rot.z * 0.2f);
+    g_pitch_deg = g_ypr[1] * RAD_TO_DEG;
+    g_roll_deg  = g_ypr[2] * RAD_TO_DEG;
+  }
+}
+
+/**
+ * @brief Logic when the drone is disarmed (g_is_armed == false).
+ * 
+ * - We only arm if onOff == 1 AND the throttle is fully down.
+ * - If battery is below CRITICAL_BATTERY_VOLTAGE, we refuse to arm.
+ */
+void handle_disarmed_state()
+{
+  // Hard failsafe: if battery below critical threshold, refuse to arm
+  if (g_battery_voltage < CRITICAL_BATTERY_VOLTAGE)
+  {
+    RemoteXY.onOff = 0; // stay disarmed
+    snprintf_P(RemoteXY.textField, sizeof(RemoteXY.textField),
+               PSTR("Battery too low!"));
+    return;
+  }
+
+  // Don’t allow arming if throttle isn’t fully down
+  if (RemoteXY.onOff == 1)
+  {
+    if (RemoteXY.joyYT_y > -100)
+    {
+      RemoteXY.onOff = 0;
+      return;
+    }
+    else
+    {
+      g_is_armed = true;
+      // Re-enable full PID only upon arming
+      yaw_pid.SetTunings(y_p, y_i, y_d);
+      pitch_pid.SetTunings(pr_p, pr_i, pr_d);
+      roll_pid.SetTunings(pr_p, pr_i, pr_d);
+    }
+  }
+
+  // Battery low check (soft warning at e.g. 3.8f)
+  if (g_battery_voltage > 1 && g_battery_voltage < 3.8f)
+  {
+    dtostrf(g_battery_voltage, 1, 1, g_buffer0);
+    snprintf_P(RemoteXY.textField, sizeof(RemoteXY.textField),
+               PSTR("%sV Battery low!"), g_buffer0);
+  }
+  else if (millis() - g_timer_battery > 100)
+  {
+    set_pid_increments();
+
+    switch (RemoteXY.btnSelect)
+    {
+      case 0:
+        dtostrf(g_battery_voltage, 1, 1, g_buffer0);
+        snprintf_P(RemoteXY.textField, sizeof(RemoteXY.textField),
+                   PSTR("%sV"), g_buffer0);
+        break;
+
+      case 1:
+        snprintf_P(RemoteXY.textField, sizeof(RemoteXY.textField),
+                   PSTR("trim pitch:%d"), trim_pitch);
+        if (RemoteXY.btnGreen) ++trim_pitch;
+        else if (RemoteXY.btnRed) --trim_pitch;
+        break;
+
+      case 2:
+        snprintf_P(RemoteXY.textField, sizeof(RemoteXY.textField),
+                   PSTR("trim roll:%d"), trim_roll);
+        if (RemoteXY.btnGreen) ++trim_roll;
+        else if (RemoteXY.btnRed) --trim_roll;
+        break;
+
+      case 3:
+        dtostrf(pr_p, 1, 3, g_buffer0);
+        snprintf_P(RemoteXY.textField, sizeof(RemoteXY.textField),
+                   PSTR("prP:%s"), g_buffer0);
+        if (RemoteXY.btnGreen) pr_p += pid_increment;
+        else if (RemoteXY.btnRed) pr_p -= pid_increment;
+        break;
+
+      case 4:
+        dtostrf(pr_i, 1, 3, g_buffer0);
+        snprintf_P(RemoteXY.textField, sizeof(RemoteXY.textField),
+                   PSTR("prI:%s"), g_buffer0);
+        if (RemoteXY.btnGreen) pr_i += pid_increment;
+        else if (RemoteXY.btnRed) pr_i -= pid_increment;
+        break;
+
+      case 5:
+        dtostrf(pr_d, 1, 3, g_buffer0);
+        snprintf_P(RemoteXY.textField, sizeof(RemoteXY.textField),
+                   PSTR("prD:%s"), g_buffer0);
+        if (RemoteXY.btnGreen) pr_d += pid_increment;
+        else if (RemoteXY.btnRed) pr_d -= pid_increment;
+        break;
+
+      case 6:
+        dtostrf(y_p, 1, 3, g_buffer0);
+        snprintf_P(RemoteXY.textField, sizeof(RemoteXY.textField),
+                   PSTR("yP:%s"), g_buffer0);
+        if (RemoteXY.btnGreen) y_p += pid_increment;
+        else if (RemoteXY.btnRed) y_p -= pid_increment;
+        break;
+
+      case 7:
+        dtostrf(y_i, 1, 3, g_buffer0);
+        snprintf_P(RemoteXY.textField, sizeof(RemoteXY.textField),
+                   PSTR("yI:%s"), g_buffer0);
+        if (RemoteXY.btnGreen) y_i += pid_increment;
+        else if (RemoteXY.btnRed) y_i -= pid_increment;
+        break;
+
+      case 8:
+        dtostrf(y_d, 1, 3, g_buffer0);
+        snprintf_P(RemoteXY.textField, sizeof(RemoteXY.textField),
+                   PSTR("yD:%s"), g_buffer0);
+        if (RemoteXY.btnGreen) y_d += pid_increment;
+        else if (RemoteXY.btnRed) y_d -= pid_increment;
+        break;
+
+      case 9:
+        // Disallow negative Kp, Ki, Kd
+        if (RemoteXY.btnGreen)
+        {
+          if (pr_p < 0) pr_p = 0.0f;
+          if (pr_i < 0) pr_i = 0.0f;
+          if (pr_d < 0) pr_d = 0.0f;
+          if (y_p  < 0) y_p  = 0.0f;
+          if (y_i  < 0) y_i  = 0.0f;
+          if (y_d  < 0) y_d  = 0.0f;
+
+          roll_pid.SetTunings(pr_p, pr_i, pr_d);
+          pitch_pid.SetTunings(pr_p, pr_i, pr_d);
+          yaw_pid.SetTunings(y_p, y_i, y_d);
+          snprintf_P(RemoteXY.textField, sizeof(RemoteXY.textField),
+                     PSTR("--OK--"));
+        }
+        else
+        {
+          snprintf_P(RemoteXY.textField, sizeof(RemoteXY.textField),
+                     PSTR("Tune PID params?"));
+        }
+        break;
+
+      default:
+        // do nothing
+        break;
+    }
+    g_timer_battery = millis();
+  }
+}
+
+/**
+ * @brief Logic when the drone is armed (g_is_armed == true).
+ * 
+ * - If pitch or roll angles exceed ±80°, or user toggles onOff=0, we disarm.
+ * - If battery is below CRITICAL_BATTERY_VOLTAGE, also disarm immediately.
+ */
+void handle_armed_state()
+{
+  // Battery failsafe if below critical voltage
+  if (g_battery_voltage < CRITICAL_BATTERY_VOLTAGE)
+  {
+    g_is_armed = false;
+    RemoteXY.onOff = 0;
+    snprintf_P(RemoteXY.textField, sizeof(RemoteXY.textField),
+               PSTR("Battery too low!"));
+
+    // Disable I term
+    yaw_pid.SetTunings(y_p, 0.0f, y_d);
+    pitch_pid.SetTunings(pr_p, 0.0f, pr_d);
+    roll_pid.SetTunings(pr_p, 0.0f, pr_d);
+    return;
+  }
+
+  // Disarm if overturning or onOff toggled off
+  if (fabs(g_pitch_deg) > 80 || fabs(g_roll_deg) > 80 || RemoteXY.onOff == 0)
+  {
+    g_is_armed = false;
+    RemoteXY.onOff = 0;
+    // Disable I term
+    yaw_pid.SetTunings(y_p, 0.0f, y_d);
+    pitch_pid.SetTunings(pr_p, 0.0f, pr_d);
+    roll_pid.SetTunings(pr_p, 0.0f, pr_d);
+    return;
+  }
+
+  // Show data in textField
+  switch (RemoteXY.btnSelect)
+  {
+    case 0:
+      dtostrf(g_battery_voltage, 1, 1, g_buffer0);
+      snprintf_P(RemoteXY.textField, sizeof(RemoteXY.textField),
+                 PSTR("%sV"), g_buffer0);
+      break;
+
+    case 1:
+      dtostrf(g_yaw_dps,    3, 1, g_buffer0);
+      dtostrf(g_pitch_deg, 3, 1, g_buffer1);
+      dtostrf(g_roll_deg,  3, 1, g_buffer2);
+      snprintf_P(RemoteXY.textField, sizeof(RemoteXY.textField),
+                 PSTR("Y:%s;P:%s;R:%s"), g_buffer0, g_buffer1, g_buffer2);
+      break;
+
+    case 2:
+      dtostrf(yaw_setpoint,   2, 2, g_buffer0);
+      dtostrf(pitch_setpoint, 2, 2, g_buffer1);
+      dtostrf(roll_setpoint,  2, 2, g_buffer2);
+      dtostrf(g_throttle,     2, 2, g_buffer3);
+      snprintf_P(RemoteXY.textField, sizeof(RemoteXY.textField),
+                 PSTR("joyY:%s;P:%s;R:%s;T:%d"), 
+                 g_buffer0, g_buffer1, g_buffer2, g_throttle);
+      break;
+
+    case 3:
+      dtostrf(yaw_pid.GetPterm(),   1, 2, g_buffer0);
+      dtostrf(pitch_pid.GetPterm(), 1, 2, g_buffer1);
+      dtostrf(roll_pid.GetPterm(),  1, 2, g_buffer2);
+      snprintf_P(RemoteXY.textField, sizeof(RemoteXY.textField),
+                 PSTR("yP:%s;pP:%s;rP:%s"), g_buffer0, g_buffer1, g_buffer2);
+      break;
+
+    case 4:
+      dtostrf(pitch_pid.GetIterm(), 1, 2, g_buffer0);
+      dtostrf(roll_pid.GetIterm(),  1, 2, g_buffer1);
+      snprintf_P(RemoteXY.textField, sizeof(RemoteXY.textField),
+                 PSTR("pI:%s;rI:%s"), g_buffer0, g_buffer1);
+      break;
+
+    case 5:
+      dtostrf(yaw_pid.GetDterm(),   1, 2, g_buffer0);
+      dtostrf(pitch_pid.GetDterm(), 1, 2, g_buffer1);
+      dtostrf(roll_pid.GetDterm(),  1, 2, g_buffer2);
+      snprintf_P(RemoteXY.textField, sizeof(RemoteXY.textField),
+                 PSTR("yD:%s;pD:%s;rD:%s"), g_buffer0, g_buffer1, g_buffer2);
+      break;
+
+    case 6:
+      dtostrf(pitch_output, 1, 1, g_buffer0);
+      dtostrf(roll_output,  1, 1, g_buffer1);
+      dtostrf(yaw_output,   1, 1, g_buffer3);
+      snprintf_P(RemoteXY.textField, sizeof(RemoteXY.textField),
+                 PSTR("outP:%s;R:%s;Y:%s"), g_buffer0, g_buffer1, g_buffer3);
+      break;
+
+    case 9:
+      if (RemoteXY.textField[0] != 0)
+        strcpy(RemoteXY.textField, "");
+      break;
+
+    default:
+      snprintf_P(RemoteXY.textField, sizeof(RemoteXY.textField),
+                 PSTR("FL:%d;FR:%d;BL:%d;BR:%d"), 
+                 fl_speed, fr_speed, bl_speed, br_speed);
+      break;
+  }
+}
+
+////////////////////////////////////////////////
+//                   SETUP                    //
+////////////////////////////////////////////////
+void setup()
+{
+  // Increase PWM frequencies:
+  // Pins D9,D10 => Timer1
+  TCCR1A = 0b00000001; // 8-bit
+  TCCR1B = 0b00001001; // x1 fast PWM
+
+  // Pins D3,D11 => Timer2
+  TCCR2A = 0b00000011; // 8-bit
+  TCCR2B = 0b00000001; // x1 fast PWM
+
 #if I2CDEV_IMPLEMENTATION == I2CDEV_ARDUINO_WIRE
-    Wire.begin();
-    TWBR = 24;  // 400kHz I2C clock
+  Wire.begin();
+  TWBR = 24; // 400kHz I2C clock
 #elif I2CDEV_IMPLEMENTATION == I2CDEV_BUILTIN_FASTWIRE
-    Fastwire::setup(400, true);
+  Fastwire::setup(400, true);
 #endif
-    Serial.begin(115200);
 
-    // Battery setup
-    pinMode(A0, INPUT);
-    analogReference(INTERNAL);
-    batteryVoltage = 4.2;  // default starting voltage (predicted full batt)
+  Serial.begin(115200);
 
-    // // Set PID modes 1U == automatic QuickPID::Control::automatic
-    rollPID.SetMode(QuickPID::Control::timer);
-    pitchPID.SetMode(QuickPID::Control::timer);
-    yawPID.SetMode(QuickPID::Control::timer);
+  pinMode(A0, INPUT);
+  analogReference(INTERNAL);
+  g_battery_voltage = 4.2f; // default starting voltage
 
-    rollPID.SetSampleTimeUs(sampleTimeUs);
-    pitchPID.SetSampleTimeUs(sampleTimeUs);
-    yawPID.SetSampleTimeUs(sampleTimeUs);
+  // Set PID modes & sample times
+  roll_pid.SetMode(QuickPID::Control::timer);
+  pitch_pid.SetMode(QuickPID::Control::timer);
+  yaw_pid.SetMode(QuickPID::Control::timer);
 
-    // Set PID limits
-    pitchPID.SetOutputLimits(-prOutLimits, prOutLimits);
-    rollPID.SetOutputLimits(-prOutLimits, prOutLimits);
-    yawPID.SetOutputLimits(-yawOutLimits, yawOutLimits);
+  roll_pid.SetSampleTimeUs(CALC_PID_DELTA_MICROS);
+  pitch_pid.SetSampleTimeUs(CALC_PID_DELTA_MICROS);
+  yaw_pid.SetSampleTimeUs(CALC_PID_DELTA_MICROS);
 
-    // Set PID tunings
-    pitchPID.SetTunings(prP, prI, prD);
-    rollPID.SetTunings(prP, prI, prD);
-    yawPID.SetTunings(yP, yI, yD);
+  // PID output limits
+  pitch_pid.SetOutputLimits(-PR_OUTPUT_LIMITS, PR_OUTPUT_LIMITS);
+  roll_pid.SetOutputLimits(-PR_OUTPUT_LIMITS,  PR_OUTPUT_LIMITS);
+  yaw_pid.SetOutputLimits(-YAW_OUTPUT_LIMITS,  YAW_OUTPUT_LIMITS);
 
-    // Set up ports for PWM, then in the loop we
-    // directly manipulate the compare value registers (OCR1A/B OCR2A/B)
-    // This makes a loop cycle a bit faster
-    // analogWrite(FLmotor, FLspeed);
-    // analogWrite(FRmotor, FRspeed);
-    // analogWrite(BLmotor, BLspeed);
-    // analogWrite(BRmotor, BRspeed);
+  // PID tunings
+  pitch_pid.SetTunings(pr_p, pr_i, pr_d);
+  roll_pid.SetTunings(pr_p, pr_i, pr_d);
+  yaw_pid.SetTunings(y_p,  y_i,  y_d);
 
-    // MPU6050 init, setup and calibration
-    devStatus = mpu.dmpInitialize();
-    mpu.setXAccelOffset(127);  // replace these with your own offsets
-    mpu.setYAccelOffset(-2497);
-    mpu.setZAccelOffset(1773);
-    mpu.setXGyroOffset(-93);
-    mpu.setYGyroOffset(16);
-    mpu.setZGyroOffset(60);
-    // Serial.println(mpu.testConnection() ? F("MPU6050 connection successful") : F("MPU6050 connection failed"));
-    if (devStatus == 0) {
-        // Serial.println(F("Calibrating"));
-        // mpu.CalibrateAccel(CAL_N);
-        // mpu.CalibrateGyro(CAL_N);
+  // Initialize MPU
+  g_dev_status = mpu.dmpInitialize();
 
-        /*
-                -- READ THIS --
-                On the first run set CAL_N to 100.
-        Then uncomment the line 'mpu.PrintActiveOffsets() and run.
-                It will print out new active offsets. Replace printed out offsets with Accel and Gyro offsets with the printed ones.
-        After that revert CAL_N to around 6 (more means longer calibration time but higher accuracy)
-                */
-        // mpu.PrintActiveOffsets();
+  // Replace these with your calibration offsets if needed:
+  mpu.setXAccelOffset(127);
+  mpu.setYAccelOffset(-2497);
+  mpu.setZAccelOffset(1773);
+  mpu.setXGyroOffset(-93);
+  mpu.setYGyroOffset(16);
+  mpu.setZGyroOffset(60);
 
-        // Serial.println(F("Calibration completed"));
-        // Serial.println(F("Enabling DMP"));
-        mpu.setDMPEnabled(true);
-        // Serial.println(F("Enabling interrupt"));
-        attachInterrupt(digitalPinToInterrupt(2), dmpDataReady, RISING);
-        mpuIntStatus = mpu.getIntStatus();
-        // Serial.println(F("DMP Ready, waiting for first interrupt"));
-        dmpReady = true;
+  Serial.print(mpu.testConnection() ? F("MPU6050 connection successful")
+                                    : F("MPU6050 connection failed"));
 
-        // Get expected packed size for later comparison
-        packetSize = mpu.dmpGetFIFOPacketSize();
-    } else {
-        // ERROR!
-        // 1 = initial memory load failed
-        // 2 = DMP configuration updates failed
-        // (if it's going to break, usually the code will be 1)
-        // Serial.print(F("DMP Initialization failed (code "));
-        Serial.print(devStatus);
-        // Serial.println(F(")"));
-    }
+  if (g_dev_status == 0)
+  {
+    mpu.setRate(0);
+    mpu.setDLPFMode(MPU6050_DLPF_BW_256);
+    mpu.setFullScaleAccelRange(MPU6050_ACCEL_FS_4);
+    mpu.setFullScaleGyroRange(MPU6050_GYRO_FS_500);
 
-    Serial.end();
-    delay(200);
+    // If you want to calibrate the MPU, uncomment:
+    // mpu.CalibrateAccel(CAL_ITERATIONS);
+    // mpu.CalibrateGyro(CAL_ITERATIONS);
 
-    RemoteXY_Init();
-    RemoteXY.joyYT_y = -100;
-    timerBattery = millis();
-    timerSetpoint = millis();
-    timerPID = micros();
+    mpu.setDMPEnabled(true);
+    attachInterrupt(digitalPinToInterrupt(2), on_dmp_data_ready, RISING);
+    g_mpu_int_status = mpu.getIntStatus();
+    g_dmp_ready      = true;
+    g_packet_size    = mpu.dmpGetFIFOPacketSize();
+  }
+  else
+  {
+    Serial.print(F("DMP Initialization failed with code: "));
+    Serial.print(g_dev_status);
+    exit(g_dev_status);
+  }
+
+  Serial.end();
+  RemoteXY_delay(20);
+
+  // Initialize RemoteXY and set throttle to min
+  RemoteXY_Init();
+  RemoteXY.joyYT_y = -100;
+  g_timer_battery  = millis();
+  g_timer_setpoint = millis();
+  g_timer_pid      = micros();
 }
 
-/////////////////////////////////////////////
-//                  LOOP                   //
-/////////////////////////////////////////////
+////////////////////////////////////////////////
+//                    LOOP                    //
+////////////////////////////////////////////////
+void loop()
+{
+  if (!g_dmp_ready) return;
 
-void loop() {
-    // if (!dmpReady) return;
-    computePID();  // we check computePID so many times so there is a lesser chance timer will be missed
-    // perform remoteXY HW serial data transfer
-    RemoteXY_Handler();
-    computePID();
-    // MPU get data and calculate yaw pitch roll position
-    if (mpu.dmpGetCurrentFIFOPacket(fifoBuffer)) {
-        computePID();
-        mpu.dmpGetQuaternion(&q, fifoBuffer);
-        mpu.dmpGetGravity(&gravity, &q);
-        mpu.dmpGetYawPitchRoll(ypr, &q, &gravity);
-        mpu.dmpGetGyro(&rot, fifoBuffer);
-        yawDps = (yawDps * 0.8f) + (rot.z * 0.2f);  // complementary filter
-        // yawDeg = ypr[0] * RAD_TO_DEG;
-        pitchDeg = ypr[1] * RAD_TO_DEG;
-        rollDeg = ypr[2] * RAD_TO_DEG;
-    }
-    computePID();
+  // 1) Handle RemoteXY data
+  RemoteXY_Handler();
 
-    calculateSetpoint();
+  // 2) Read MPU data
+  read_mpu_data();
 
-    computePID();
+  // 3) PID computations
+  compute_pid();
 
-    smoothBat();
+  // 4) Update setpoints & battery
+  calculate_setpoint();
+  smooth_battery();
 
-    /*
-    RemoteXY select buttons
-    A = battery
-        B,C,D,E,F,G = prP, prI, prD, yP, yI, yD
-        H = apply new tuning params
-    */
-
-    if (armDisarm == 0) {
-        // don't allow arming the drone if the throttle isn't == 0 (joystick value == -100)
-        // it's inside this if statement, so we don't check armDisarm == 0 more than once
-        if (RemoteXY.onOff == 1) {
-            if (RemoteXY.joyYT_y > -100) {
-                RemoteXY.onOff = 0;
-                return;
-            } else {
-                armDisarm = 1;
-                // Calculate I only when drone is armed, so I term doesn't saturate too much on the uneaven terrain
-                yawPID.SetTunings(yP, yI, yD);
-                pitchPID.SetTunings(prP, prI, prD);
-                rollPID.SetTunings(prP, prI, prD);
-            }
-        }
-        if (batteryVoltage > 1 && batteryVoltage < 3.8) {
-            dtostrf(batteryVoltage, 1, 1, buf0);
-            snprintf_P(RemoteXY.textField, sizeof(RemoteXY.textField), PSTR("%sV Battery low!"), buf0);
-
-            // We check if 200 ms has passed, so buttons work more consistent
-        } else if (millis() - timerBattery > 100) {
-            setPIDincrements();
-            switch (RemoteXY.btnSelect) {
-                case 0:
-                    dtostrf(batteryVoltage, 1, 1, buf0);
-                    snprintf_P(RemoteXY.textField, sizeof(RemoteXY.textField), PSTR("%sV"), buf0);
-                    break;
-                case 1:
-                    snprintf_P(RemoteXY.textField, sizeof(RemoteXY.textField), PSTR("trim pitch:%d"), trimPitch);
-                    if (RemoteXY.btnGreen)
-                        ++trimPitch;
-                    else if (RemoteXY.btnRed)
-                        --trimPitch;
-                    break;
-                case 2:
-                    snprintf_P(RemoteXY.textField, sizeof(RemoteXY.textField), PSTR("trim roll:%d"), trimRoll);
-                    if (RemoteXY.btnGreen)
-                        ++trimRoll;
-                    else if (RemoteXY.btnRed)
-                        --trimRoll;
-                    break;
-                case 3:
-                    dtostrf(prP, 1, 3, buf0);
-                    snprintf_P(RemoteXY.textField, sizeof(RemoteXY.textField), PSTR("prP:%s"), buf0);
-                    if (RemoteXY.btnGreen)
-                        prP += incrementPID;
-                    else if (RemoteXY.btnRed)
-                        prP -= incrementPID;
-                    break;
-                case 4:
-                    dtostrf(prI, 1, 3, buf0);
-                    snprintf_P(RemoteXY.textField, sizeof(RemoteXY.textField), PSTR("prI:%s"), buf0);
-                    if (RemoteXY.btnGreen)
-                        prI += incrementPID;
-                    else if (RemoteXY.btnRed)
-                        prI -= incrementPID;
-                    break;
-                case 5:
-                    dtostrf(prD, 1, 3, buf0);
-                    snprintf_P(RemoteXY.textField, sizeof(RemoteXY.textField), PSTR("prD:%s"), buf0);
-                    if (RemoteXY.btnGreen)
-                        prD += incrementPID;
-                    else if (RemoteXY.btnRed)
-                        prD -= incrementPID;
-                    break;
-                case 6:
-                    dtostrf(yP, 1, 3, buf0);
-                    snprintf_P(RemoteXY.textField, sizeof(RemoteXY.textField), PSTR("yP:%s"), buf0);
-                    if (RemoteXY.btnGreen)
-                        yP += incrementPID;
-                    else if (RemoteXY.btnRed)
-                        yP -= incrementPID;
-                    break;
-                case 7:
-                    dtostrf(yI, 1, 3, buf0);
-                    snprintf_P(RemoteXY.textField, sizeof(RemoteXY.textField), PSTR("yI:%s"), buf0);
-                    if (RemoteXY.btnGreen)
-                        yI += incrementPID;
-                    else if (RemoteXY.btnRed)
-                        yI -= incrementPID;
-                    break;
-                case 8:
-                    dtostrf(yD, 1, 3, buf0);
-                    snprintf_P(RemoteXY.textField, sizeof(RemoteXY.textField), PSTR("yD:%s"), buf0);
-                    if (RemoteXY.btnGreen)
-                        yD += incrementPID;
-                    else if (RemoteXY.btnRed)
-                        yD -= incrementPID;
-                    break;
-                case 9:
-                    // Don't allow negative Kp, Ki and Kd values
-                    if (RemoteXY.btnGreen) {
-                        if (prP < 0) {
-                            prP = 0.0f;
-                        }
-                        if (prI < 0) {
-                            prI = 0.0f;
-                        }
-                        if (prD < 0) {
-                            prD = 0.0f;
-                        }
-                        if (yP < 0) {
-                            yP = 0.0f;
-                        }
-                        if (yI < 0) {
-                            yI = 0.0f;
-                        }
-                        if (yD < 0) {
-                            yD = 0.0f;
-                        }
-                        rollPID.SetTunings(static_cast<double>(prP), static_cast<double>(prI), static_cast<double>(prD));
-                        pitchPID.SetTunings(static_cast<double>(prP), static_cast<double>(prI), static_cast<double>(prD));
-                        yawPID.SetTunings(static_cast<double>(yP), static_cast<double>(yI), static_cast<double>(yD));
-                        snprintf_P(RemoteXY.textField, sizeof(RemoteXY.textField), PSTR("--OK--"));
-                    } else {
-                        snprintf_P(RemoteXY.textField, sizeof(RemoteXY.textField), PSTR("Tune PID params?"));
-                    }
-                    break;
-                default:
-                    break;
-            }
-            timerBattery = millis();
-        }
-    } else {
-        // disarm the drone if it's overturning or onOff is switched off
-        if (abs(pitchDeg) > 80 || abs(rollDeg) > 80 || RemoteXY.onOff == 0) {
-            armDisarm = 0;
-            RemoteXY.onOff = 0;
-            // dissable I term when drone isn't armed to prevent unwanted satturation
-            yawPID.SetTunings(yP, 0.0f, yD);
-            pitchPID.SetTunings(prP, 0.0f, prD);
-            rollPID.SetTunings(prP, 0.0f, prD);
-            return;
-        }
-        // if (batteryVoltage > 1 && batteryVoltage < 3.8) {
-        //     dtostrf(batteryVoltage, 1, 1, buf0);
-        //     snprintf_P(RemoteXY.textField, sizeof(RemoteXY.textField), PSTR("%s Battery low!"), buf0);
-        // } else {
-        switch (RemoteXY.btnSelect) {
-            case 0:
-                dtostrf(batteryVoltage, 1, 1, buf0);
-                snprintf_P(RemoteXY.textField, sizeof(RemoteXY.textField), PSTR("%sV"), buf0);
-                break;
-            case 1:
-                dtostrf(yawDps, 3, 1, buf0);
-                dtostrf(pitchDeg, 3, 1, buf1);
-                dtostrf(rollDeg, 3, 1, buf2);
-                snprintf_P(RemoteXY.textField, sizeof(RemoteXY.textField), PSTR("Y:%s;P:%s;R:%s"), buf0, buf1, buf2);
-                break;
-            case 2:
-                dtostrf(yawSetpoint, 2, 2, buf0);
-                dtostrf(pitchSetpoint, 2, 2, buf1);
-                dtostrf(rollSetpoint, 2, 2, buf2);
-                dtostrf(throttle, 2, 2, buf3);
-                snprintf_P(RemoteXY.textField, sizeof(RemoteXY.textField), PSTR("joyY:%s;P:%s;R:%s;T:%d"), buf0, buf1, buf2, throttle);
-                break;
-            case 3:
-                dtostrf(yawPID.GetPterm(), 1, 2, buf0);
-                dtostrf(pitchPID.GetPterm(), 1, 2, buf1);
-                dtostrf(rollPID.GetPterm(), 1, 2, buf2);
-                snprintf_P(RemoteXY.textField, sizeof(RemoteXY.textField), PSTR("yP:%s;pP:%s;rP:%s"), buf0, buf1, buf2);
-                break;
-            case 4:
-                dtostrf(pitchPID.GetIterm(), 1, 2, buf0);
-                dtostrf(rollPID.GetIterm(), 1, 2, buf1);
-                snprintf_P(RemoteXY.textField, sizeof(RemoteXY.textField), PSTR("pI:%s;rI:%s"), buf0, buf1);
-                break;
-            case 5:
-                dtostrf(yawPID.GetDterm(), 1, 2, buf0);
-                dtostrf(pitchPID.GetDterm(), 1, 2, buf1);
-                dtostrf(rollPID.GetDterm(), 1, 2, buf2);
-                snprintf_P(RemoteXY.textField, sizeof(RemoteXY.textField), PSTR("yD:%s;pD:%s;rD:%s"), buf0, buf1, buf2);
-                break;
-            case 6:
-                dtostrf(pitchOutput, 1, 1, buf0);
-                dtostrf(rollOutput, 1, 1, buf1);
-                dtostrf(yawOutput, 1, 1, buf3);
-                snprintf_P(RemoteXY.textField, sizeof(RemoteXY.textField), PSTR("outP:%s;R:%s;Y:%s"), buf0, buf1, buf3);
-                break;
-            case 9:
-                if (RemoteXY.textField[0] != 0)
-                    strcpy(RemoteXY.textField, "");
-                break;
-            default:
-                snprintf_P(RemoteXY.textField, sizeof(RemoteXY.textField), PSTR("FL:%d;FR:%d;BL:%d;BR:%d"), FLspeed, FRspeed, BLspeed, BRspeed);
-                break;
-        }
-    }
-
-    computePID();
+  // 5) Run logic depending on armed state
+  if (!g_is_armed)
+    handle_disarmed_state();
+  else
+    handle_armed_state();
 }
