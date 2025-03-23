@@ -199,7 +199,7 @@ void on_dmp_data_ready()
 /**
  * @brief Smooth the battery reading with a complementary filter.
  */
-void smooth_battery()
+void update_battery_voltage()
 {
   float battery_reading = analogRead(A0) * AREF_VOLTAGE_STEP * VOLT_DIV_SCALING_FACTOR;
   g_battery_voltage = g_battery_voltage * (1.0f - BATTERY_FILTER_ALPHA) 
@@ -248,7 +248,7 @@ void set_motor_speed()
 /**
  * @brief Refresh setpoints (roll, pitch, yaw, throttle) from RemoteXY controls.
  */
-void calculate_setpoint()
+void update_control_setpoints()
 {
   if (millis() - g_timer_setpoint > 50)
   {
@@ -716,12 +716,12 @@ void loop()
   // 2) Read MPU data
   read_mpu_data();
 
-  // 3) PID computations
-  compute_pid();
+  // 3) Update setpoints & battery
+  update_control_setpoints();
+  update_battery_voltage();
 
-  // 4) Update setpoints & battery
-  calculate_setpoint();
-  smooth_battery();
+  // 4) PID computations
+  compute_pid();
 
   // 5) Run logic depending on armed state
   if (!g_is_armed)
